@@ -185,6 +185,55 @@ static int opt_set_filter(const struct option *opt __used,
 	return 0;
 }
 
+static int opt_set_executable(const struct option *opt __used,
+			  const char *str, int unset __used)
+{
+	if (params.target || !str)
+		return -EINVAL;
+
+	if (params.uprobes) {
+		pr_err("  Error: Don't use -m with --uprobes.\n");
+		return -EINVAL;
+	}
+
+	if (str) {
+		params.target = str;
+		params.uprobes = true;
+	}
+	return 0;
+}
+
+#ifdef DWARF_SUPPORT
+static int opt_set_module(const struct option *opt __used,
+			  const char *str, int unset __used)
+{
+	if (params.target || !str)
+		return -EINVAL;
+
+	if (params.uprobes) {
+		pr_err("  Error: Don't use -m with --uprobes.\n");
+		return -EINVAL;
+	}
+
+	if (str)
+		params.target = str;
+
+	return 0;
+}
+#endif
+
+static int opt_set_uprobes(const struct option *opt __used,
+			  const char *str __used, int unset __used)
+{
+	if (params.target) {
+		pr_err("  Error: Don't use --uprobes with -x/-m.\n");
+		return -EINVAL;
+	}
+
+	params.uprobes = true;
+	return 0;
+}
+
 static const char * const probe_usage[] = {
 	"perf probe [<options>] 'PROBEDEF' ['PROBEDEF' ...]",
 	"perf probe [<options>] --add 'PROBEDEF' [--add 'PROBEDEF' ...]",
@@ -243,16 +292,18 @@ static const struct option options[] = {
 		   "file", "vmlinux pathname"),
 	OPT_STRING('s', "source", &symbol_conf.source_prefix,
 		   "directory", "path to kernel source"),
-	OPT_STRING('m', "module", &params.target,
-		   "modname", "target module name"),
+	OPT_CALLBACK('m', "module", NULL, "modname", "target module name",
+		   opt_set_module),
 #endif
 	OPT__DRY_RUN(&probe_event_dry_run),
 	OPT_INTEGER('\0', "max-probes", &params.max_probe_points,
 		 "Set how many probe points can be found for a probe."),
 	OPT_BOOLEAN('F', "funcs", &params.show_funcs,
 		    "Show potential probe-able functions."),
-	OPT_BOOLEAN('u', "uprobes", &params.uprobes,
-		    "user space probe events"),
+	OPT_CALLBACK_NOOPT('u', "uprobes", NULL, NULL,
+		    "user space probe events", opt_set_uprobes),
+	OPT_CALLBACK('x', "exe", NULL, "/path/to/absolute/relative/file",
+		    "target executable name", opt_set_executable),
 	OPT_CALLBACK('\0', "filter", NULL,
 		     "[!]FILTER", "Set a filter (with --vars/funcs only)\n"
 		     "\t\t\t(default: \"" DEFAULT_VAR_FILTER "\" for --vars,\n"
@@ -335,8 +386,8 @@ int cmd_probe(int argc, const char **argv, const char *prefix __used)
 		if (!params.filter)
 			params.filter = strfilter__new(DEFAULT_FUNC_FILTER,
 						       NULL);
-		ret = show_available_funcs(params.target,
-					   params.filter);
+		ret = show_available_funcs(params.target, params.filter,
+					params.uprobes);
 		strfilter__delete(params.filter);
 		if (ret < 0)
 			pr_err("  Error: Failed to show functions."

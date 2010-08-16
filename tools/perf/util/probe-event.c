@@ -47,6 +47,7 @@
 #include "trace-event.h"	/* For __unused */
 #include "probe-event.h"
 #include "probe-finder.h"
+#include "session.h"
 
 #define MAX_CMDLEN 256
 #define MAX_PROBE_ARGS 128
@@ -2094,6 +2095,7 @@ error:
 	}
 	return ret;
 }
+
 /* TODO: don't use a global variable for filter ... */
 static struct strfilter *available_func_filter;
 
@@ -2110,23 +2112,8 @@ static int filter_available_functions(struct map *map __unused,
 	return 1;
 }
 
-int show_available_funcs(const char *elfobject, struct strfilter *_filter)
+static int __show_available_funcs(struct map *map)
 {
-	struct map *map;
-	int ret;
-
-	setup_pager();
-
-	ret = init_vmlinux();
-	if (ret < 0)
-		return ret;
-
-	map = kernel_get_module_map(elfobject);
-	if (!map) {
-		pr_err("Failed to find %s map.\n", (elfobject) ? : "kernel");
-		return -EINVAL;
-	}
-	available_func_filter = _filter;
 	if (map__load(map, filter_available_functions)) {
 		pr_err("Failed to load map.\n");
 		return -EINVAL;
@@ -2136,6 +2123,49 @@ int show_available_funcs(const char *elfobject, struct strfilter *_filter)
 
 	dso__fprintf_symbols_by_name(map->dso, map->type, stdout);
 	return 0;
+}
+
+static int available_kernel_funcs(const char *module)
+{
+	struct map *map;
+	int ret;
+
+	ret = init_vmlinux();
+	if (ret < 0)
+		return ret;
+
+	map = kernel_get_module_map(module);
+	if (!map) {
+		pr_err("Failed to find %s map.\n", (module) ? : "kernel");
+		return -EINVAL;
+	}
+	return __show_available_funcs(map);
+}
+
+int show_available_funcs(const char *elfobject, struct strfilter *_filter,
+					bool user)
+{
+	struct map *map;
+	int ret;
+
+	setup_pager();
+	available_func_filter = _filter;
+
+	if (!user)
+		return available_kernel_funcs(elfobject);
+
+	symbol_conf.try_vmlinux_path = false;
+	symbol_conf.sort_by_name = true;
+	ret = symbol__init();
+	if (ret < 0) {
+		pr_err("Failed to init symbol map.\n");
+		return ret;
+	}
+	map = dso__new_map(elfobject);
+	ret = __show_available_funcs(map);
+	dso__delete(map->dso);
+	map__delete(map);
+	return ret;
 }
 
 #define DEFAULT_FUNC_FILTER "!_*"
