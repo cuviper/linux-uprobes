@@ -57,6 +57,7 @@ static struct {
 	bool show_ext_vars;
 	bool show_funcs;
 	bool mod_events;
+	bool uprobes;
 	int nevents;
 	struct perf_probe_event events[MAX_PROBES];
 	struct strlist *dellist;
@@ -78,6 +79,7 @@ static int parse_probe_event(const char *str)
 		return -1;
 	}
 
+	pev->uprobes = params.uprobes;
 	/* Parse a perf-probe command into event */
 	ret = parse_perf_probe_command(str, pev);
 	pr_debug("%d arguments\n", pev->nargs);
@@ -249,6 +251,8 @@ static const struct option options[] = {
 		 "Set how many probe points can be found for a probe."),
 	OPT_BOOLEAN('F', "funcs", &params.show_funcs,
 		    "Show potential probe-able functions."),
+	OPT_BOOLEAN('u', "uprobes", &params.uprobes,
+		    "user space probe events"),
 	OPT_CALLBACK('\0', "filter", NULL,
 		     "[!]FILTER", "Set a filter (with --vars/funcs only)\n"
 		     "\t\t\t(default: \"" DEFAULT_VAR_FILTER "\" for --vars,\n"
@@ -304,6 +308,10 @@ int cmd_probe(int argc, const char **argv, const char *prefix __used)
 			pr_err("  Error: Don't use --list with --funcs.\n");
 			usage_with_options(probe_usage, options);
 		}
+		if (params.uprobes) {
+			pr_warning("  Error: Don't use --list with --uprobes.\n");
+			usage_with_options(probe_usage, options);
+		}
 		ret = show_perf_probe_events();
 		if (ret < 0)
 			pr_err("  Error: Failed to show event list. (%d)\n",
@@ -337,7 +345,7 @@ int cmd_probe(int argc, const char **argv, const char *prefix __used)
 	}
 
 #ifdef DWARF_SUPPORT
-	if (params.show_lines) {
+	if (params.show_lines && !params.uprobes) {
 		if (params.mod_events) {
 			pr_err("  Error: Don't use --line with"
 			       " --add/--del.\n");
