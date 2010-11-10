@@ -316,6 +316,11 @@ struct mm_struct {
 #ifdef CONFIG_CPUMASK_OFFSTACK
 	struct cpumask cpumask_allocation;
 #endif
+#ifdef CONFIG_UPROBES
+	unsigned long uprobes_vaddr;
+	struct list_head uprobes_list; /* protected by uprobes_mutex */
+	atomic_t uprobes_count;
+#endif
 };
 
 static inline void mm_init_cpumask(struct mm_struct *mm)
