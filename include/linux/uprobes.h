@@ -26,12 +26,14 @@
 #include <linux/rbtree.h>
 #ifdef CONFIG_ARCH_SUPPORTS_UPROBES
 #include <asm/uprobes.h>
+struct uprobe_task_arch_info;	/* arch specific task info */
 #else
 /*
  * ARCH_SUPPORTS_UPROBES is not defined.
  */
 typedef u8 uprobe_opcode_t;
 struct uprobe_arch_info	{};		/* arch specific info*/
+struct uprobe_task_arch_info {};	/* arch specific task info */
 #endif /* CONFIG_ARCH_SUPPORTS_UPROBES */
 
 /* Post-execution fixups.  Some architectures may define others. */
@@ -77,6 +79,27 @@ struct uprobe {
 	int			copy;
 };
 
+enum uprobe_task_state {
+	UTASK_RUNNING,
+	UTASK_BP_HIT,
+	UTASK_SSTEP
+};
+
+/*
+ * uprobe_utask -- not a user-visible struct.
+ * Corresponds to a thread in a probed process.
+ * Guarded by uproc->mutex.
+ */
+struct uprobe_task {
+	unsigned long xol_vaddr;
+	unsigned long vaddr;
+
+	enum uprobe_task_state state;
+	struct uprobe_task_arch_info tskinfo;
+
+	struct uprobe *active_uprobe;
+};
+
 /*
  * Most architectures can use the default versions of @read_opcode(),
  * @set_bkpt(), @set_orig_insn(), and @is_bkpt_insn();
@@ -111,6 +134,7 @@ extern int register_uprobe(struct inode *inode, loff_t offset,
 				struct uprobe_consumer *consumer);
 extern void unregister_uprobe(struct inode *inode, loff_t offset,
 				struct uprobe_consumer *consumer);
+extern void free_uprobe_utask(struct task_struct *tsk);
 
 struct vm_area_struct;
 extern int mmap_uprobe(struct vm_area_struct *vma);
@@ -133,5 +157,6 @@ static inline int mmap_uprobe(struct vm_area_struct *vma)
 {
 	return 0;
 }
+static inline void free_uprobe_utask(struct task_struct *tsk) {}
 #endif /* CONFIG_UPROBES */
 #endif	/* _LINUX_UPROBES_H */
