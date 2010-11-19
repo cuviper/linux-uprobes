@@ -12,6 +12,9 @@
 #include <linux/completion.h>
 #include <linux/cpumask.h>
 #include <linux/page-debug-flags.h>
+#ifdef CONFIG_UPROBES
+#include <linux/uprobes.h>
+#endif
 #include <asm/page.h>
 #include <asm/mmu.h>
 
@@ -320,6 +323,7 @@ struct mm_struct {
 	unsigned long uprobes_vaddr;
 	struct list_head uprobes_list; /* protected by uprobes_mutex */
 	atomic_t uprobes_count;
+	struct uprobes_xol_area *uprobes_xol_area;
 #endif
 };
 

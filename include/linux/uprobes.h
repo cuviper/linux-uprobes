@@ -101,6 +101,27 @@ struct uprobe_task {
 };
 
 /*
+ * On a breakpoint hit, thread contests for a slot.  It free the
+ * slot after singlestep.  Only definite number of slots are
+ * allocated.
+ */
+
+struct uprobes_xol_area {
+	spinlock_t slot_lock;	/* protects bitmap and slot (de)allocation*/
+	wait_queue_head_t wq;	/* if all slots are busy */
+	atomic_t slot_count;	/* currently in use slots */
+	unsigned long *bitmap;	/* 0 = free slot */
+	struct page *page;
+
+	/*
+	 * We keep the vma's vm_start rather than a pointer to the vma
+	 * itself.  The probed process or a naughty kernel module could make
+	 * the vma go away, and we must handle that reasonably gracefully.
+	 */
+	unsigned long vaddr;		/* Page(s) of instruction slots */
+};
+
+/*
  * Most architectures can use the default versions of @read_opcode(),
  * @set_bkpt(), @set_orig_insn(), and @is_bkpt_insn();
  *
@@ -139,6 +160,7 @@ extern void free_uprobe_utask(struct task_struct *tsk);
 struct vm_area_struct;
 extern int mmap_uprobe(struct vm_area_struct *vma);
 extern void dup_mmap_uprobe(struct mm_struct *old_mm, struct mm_struct *mm);
+extern void free_uprobes_xol_area(struct mm_struct *mm);
 #else /* CONFIG_UPROBES is not defined */
 static inline int register_uprobe(struct inode *inode, loff_t offset,
 				struct uprobe_consumer *consumer)
@@ -158,5 +180,6 @@ static inline int mmap_uprobe(struct vm_area_struct *vma)
 	return 0;
 }
 static inline void free_uprobe_utask(struct task_struct *tsk) {}
+static inline void free_uprobes_xol_area(struct mm_struct *mm) {}
 #endif /* CONFIG_UPROBES */
 #endif	/* _LINUX_UPROBES_H */
