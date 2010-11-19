@@ -36,6 +36,7 @@
 #include <linux/mman.h>	/* needed for PROT_EXEC, MAP_PRIVATE */
 #include <linux/file.h> /* needed for fput() */
 #include <linux/init_task.h> /* init_cred */
+#include <linux/kdebug.h> /* for notifier mechanism */
 
 #define UINSNS_PER_PAGE	(PAGE_SIZE/UPROBES_XOL_SLOT_BYTES)
 #define MAX_UPROBES_XOL_SLOTS UINSNS_PER_PAGE
@@ -1452,3 +1453,20 @@ int uprobe_post_notifier(struct pt_regs *regs)
 	set_thread_flag(TIF_UPROBE);
 	return 1;
 }
+
+struct notifier_block uprobe_exception_nb = {
+	.notifier_call = uprobe_exception_notify,
+	.priority = INT_MAX - 1,	/* notified after kprobes, kgdb */
+};
+
+static int __init init_uprobes(void)
+{
+	return register_die_notifier(&uprobe_exception_nb);
+}
+
+static void __exit exit_uprobes(void)
+{
+}
+
+module_init(init_uprobes);
+module_exit(exit_uprobes);
