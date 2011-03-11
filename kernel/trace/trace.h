@@ -272,8 +272,8 @@ struct tracer {
 	/* If you handled the flag setting, return 0 */
 	int			(*set_flag)(u32 old_flags, u32 bit, int set);
 	struct tracer		*next;
-	int			print_max;
 	struct tracer_flags	*flags;
+	int			print_max;
 	int			use_max_tr;
 };
 
@@ -606,6 +606,7 @@ enum trace_iterator_flags {
 	TRACE_ITER_SLEEP_TIME		= 0x40000,
 	TRACE_ITER_GRAPH_TIME		= 0x80000,
 	TRACE_ITER_RECORD_CMD		= 0x100000,
+	TRACE_ITER_OVERWRITE		= 0x200000,
 };
 
 /*
