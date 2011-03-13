@@ -72,6 +72,7 @@ static irqreturn_t math_error_irq(int cpl, void *dev_id)
 static struct irqaction fpu_irq = {
 	.handler = math_error_irq,
 	.name = "fpu",
+	.flags = IRQF_NO_THREAD,
 };
 #endif
 
@@ -81,6 +82,7 @@ static struct irqaction fpu_irq = {
 static struct irqaction irq2 = {
 	.handler = no_action,
 	.name = "cascade",
+	.flags = IRQF_NO_THREAD,
 };
 
 DEFINE_PER_CPU(vector_irq_t, vector_irq) = {
@@ -111,7 +113,7 @@ void __init init_ISA_irqs(void)
 	legacy_pic->init(0);
 
 	for (i = 0; i < legacy_pic->nr_legacy_irqs; i++)
-		set_irq_chip_and_handler_name(i, chip, handle_level_irq, name);
+		irq_set_chip_and_handler_name(i, chip, handle_level_irq, name);
 }
 
 void __init init_IRQ(void)
