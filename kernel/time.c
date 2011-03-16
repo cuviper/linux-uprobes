@@ -644,25 +644,6 @@ u64 nsec_to_clock_t(u64 x)
 #endif
 }
 
-
-/**
- * nsecs_to_jiffies - Convert nsecs in u64 to jiffies
- *
- * @n:	nsecs in u64
- *
- * Unlike {m,u}secs_to_jiffies, type of input is not unsigned int but u64.
- * And this doesn't return MAX_JIFFY_OFFSET since this function is designed
- * for scheduler, not for use in device drivers to calculate timeout value.
- *
- * note:
- *   NSEC_PER_SEC = 10^9 = (5^9 * 2^9) = (1953125 * 512)
- *   ULLONG_MAX ns = 18446744073.709551615 secs = about 584 years
- */
-unsigned long nsecs_to_jiffies(u64 n)
-{
-	return (unsigned long)nsecs_to_jiffies64(n);
-}
-
 /**
  * nsecs_to_jiffies64 - Convert nsecs in u64 to jiffies64
  *
@@ -691,6 +672,24 @@ u64 nsecs_to_jiffies64(u64 n)
 	 */
 	return div_u64(n * 9, (9ull * NSEC_PER_SEC + HZ / 2) / HZ);
 #endif
+}
+
+/**
+ * nsecs_to_jiffies - Convert nsecs in u64 to jiffies
+ *
+ * @n:	nsecs in u64
+ *
+ * Unlike {m,u}secs_to_jiffies, type of input is not unsigned int but u64.
+ * And this doesn't return MAX_JIFFY_OFFSET since this function is designed
+ * for scheduler, not for use in device drivers to calculate timeout value.
+ *
+ * note:
+ *   NSEC_PER_SEC = 10^9 = (5^9 * 2^9) = (1953125 * 512)
+ *   ULLONG_MAX ns = 18446744073.709551615 secs = about 584 years
+ */
+unsigned long nsecs_to_jiffies(u64 n)
+{
+	return (unsigned long)nsecs_to_jiffies64(n);
 }
 
 /*
