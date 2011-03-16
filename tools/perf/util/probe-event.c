@@ -1976,7 +1976,7 @@ static int filter_available_functions(struct map *map __unused,
 	return 1;
 }
 
-int show_available_funcs(const char *module, struct strfilter *_filter)
+int show_available_funcs(const char *elfobject, struct strfilter *_filter)
 {
 	struct map *map;
 	int ret;
@@ -1987,9 +1987,9 @@ int show_available_funcs(const char *module, struct strfilter *_filter)
 	if (ret < 0)
 		return ret;
 
-	map = kernel_get_module_map(module);
+	map = kernel_get_module_map(elfobject);
 	if (!map) {
-		pr_err("Failed to find %s map.\n", (module) ? : "kernel");
+		pr_err("Failed to find %s map.\n", (elfobject) ? : "kernel");
 		return -EINVAL;
 	}
 	available_func_filter = _filter;
