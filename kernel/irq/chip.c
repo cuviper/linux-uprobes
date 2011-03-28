@@ -37,6 +37,12 @@ int irq_set_chip(unsigned int irq, struct irq_chip *chip)
 	irq_chip_set_defaults(chip);
 	desc->irq_data.chip = chip;
 	irq_put_desc_unlock(desc, flags);
+	/*
+	 * For !CONFIG_SPARSE_IRQ make the irq show up in
+	 * allocated_irqs. For the CONFIG_SPARSE_IRQ case, it is
+	 * already marked, and this call is harmless.
+	 */
+	irq_reserve_irq(irq);
 	return 0;
 }
 EXPORT_SYMBOL(irq_set_chip);
@@ -135,12 +141,14 @@ EXPORT_SYMBOL_GPL(irq_get_irq_data);
 static void irq_state_clr_disabled(struct irq_desc *desc)
 {
 	desc->istate &= ~IRQS_DISABLED;
+	irqd_clear(&desc->irq_data, IRQD_IRQ_DISABLED);
 	irq_compat_clr_disabled(desc);
 }
 
 static void irq_state_set_disabled(struct irq_desc *desc)
 {
 	desc->istate |= IRQS_DISABLED;
+	irqd_set(&desc->irq_data, IRQD_IRQ_DISABLED);
 	irq_compat_set_disabled(desc);
 }
 
@@ -642,8 +650,7 @@ __irq_set_handler(unsigned int irq, irq_flow_handler_t handle, int is_chained,
 	if (handle == handle_bad_irq) {
 		if (desc->irq_data.chip != &no_irq_chip)
 			mask_ack_irq(desc);
-		irq_compat_set_disabled(desc);
-		desc->istate |= IRQS_DISABLED;
+		irq_state_set_disabled(desc);
 		desc->depth = 1;
 	}
 	desc->handle_irq = handle;
@@ -688,4 +695,64 @@ void irq_modify_status(unsigned int irq, unsigned long clr, unsigned long set)
 	irqd_set(&desc->irq_data, irq_settings_get_trigger_mask(desc));
 
 	irq_put_desc_unlock(desc, flags);
+}
+
+/**
+ *	irq_cpu_online - Invoke all irq_cpu_online functions.
+ *
+ *	Iterate through all irqs and invoke the chip.irq_cpu_online()
+ *	for each.
+ */
+void irq_cpu_online(void)
+{
+	struct irq_desc *desc;
+	struct irq_chip *chip;
+	unsigned long flags;
+	unsigned int irq;
+
+	for_each_active_irq(irq) {
+		desc = irq_to_desc(irq);
+		if (!desc)
+			continue;
+
+		raw_spin_lock_irqsave(&desc->lock, flags);
+
+		chip = irq_data_get_irq_chip(&desc->irq_data);
+		if (chip && chip->irq_cpu_online &&
+		    (!(chip->flags & IRQCHIP_ONOFFLINE_ENABLED) ||
+		     !(desc->istate & IRQS_DISABLED)))
+			chip->irq_cpu_online(&desc->irq_data);
+
+		raw_spin_unlock_irqrestore(&desc->lock, flags);
+	}
+}
+
+/**
+ *	irq_cpu_offline - Invoke all irq_cpu_offline functions.
+ *
+ *	Iterate through all irqs and invoke the chip.irq_cpu_offline()
+ *	for each.
+ */
+void irq_cpu_offline(void)
+{
+	struct irq_desc *desc;
+	struct irq_chip *chip;
+	unsigned long flags;
+	unsigned int irq;
+
+	for_each_active_irq(irq) {
+		desc = irq_to_desc(irq);
+		if (!desc)
+			continue;
+
+		raw_spin_lock_irqsave(&desc->lock, flags);
+
+		chip = irq_data_get_irq_chip(&desc->irq_data);
+		if (chip && chip->irq_cpu_offline &&
+		    (!(chip->flags & IRQCHIP_ONOFFLINE_ENABLED) ||
+		     !(desc->istate & IRQS_DISABLED)))
+			chip->irq_cpu_offline(&desc->irq_data);
+
+		raw_spin_unlock_irqrestore(&desc->lock, flags);
+	}
 }
