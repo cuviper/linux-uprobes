@@ -135,7 +135,7 @@ struct msi_desc;
  * struct irq_data - per irq and irq chip data passed down to chip functions
  * @irq:		interrupt number
  * @node:		node index useful for balancing
- * @state_use_accessor: status information for irq chip functions.
+ * @state_use_accessors: status information for irq chip functions.
  *			Use accessor functions to deal with it
  * @chip:		low level interrupt hardware access
  * @handler_data:	per-IRQ data for the irq_chip methods
@@ -174,8 +174,9 @@ struct irq_data {
  *				  from suspend
  * IRDQ_MOVE_PCNTXT		- Interrupt can be moved in process
  *				  context
- * IRQD_IRQ_DISABLED		- Some chip function need to know the
- *				  disabled state.
+ * IRQD_IRQ_DISABLED		- Disabled state of the interrupt
+ * IRQD_IRQ_MASKED		- Masked state of the interrupt
+ * IRQD_IRQ_INPROGRESS		- In progress state of the interrupt
  */
 enum {
 	IRQD_TRIGGER_MASK		= 0xf,
@@ -187,6 +188,8 @@ enum {
 	IRQD_WAKEUP_STATE		= (1 << 14),
 	IRQD_MOVE_PCNTXT		= (1 << 15),
 	IRQD_IRQ_DISABLED		= (1 << 16),
+	IRQD_IRQ_MASKED			= (1 << 17),
+	IRQD_IRQ_INPROGRESS		= (1 << 18),
 };
 
 static inline bool irqd_is_setaffinity_pending(struct irq_data *d)
@@ -207,6 +210,11 @@ static inline bool irqd_can_balance(struct irq_data *d)
 static inline bool irqd_affinity_was_set(struct irq_data *d)
 {
 	return d->state_use_accessors & IRQD_AFFINITY_SET;
+}
+
+static inline void irqd_mark_affinity_was_set(struct irq_data *d)
+{
+	d->state_use_accessors |= IRQD_AFFINITY_SET;
 }
 
 static inline u32 irqd_get_trigger_type(struct irq_data *d)
@@ -241,6 +249,31 @@ static inline bool irqd_can_move_in_process_context(struct irq_data *d)
 static inline bool irqd_irq_disabled(struct irq_data *d)
 {
 	return d->state_use_accessors & IRQD_IRQ_DISABLED;
+}
+
+static inline bool irqd_irq_masked(struct irq_data *d)
+{
+	return d->state_use_accessors & IRQD_IRQ_MASKED;
+}
+
+static inline bool irqd_irq_inprogress(struct irq_data *d)
+{
+	return d->state_use_accessors & IRQD_IRQ_INPROGRESS;
+}
+
+/*
+ * Functions for chained handlers which can be enabled/disabled by the
+ * standard disable_irq/enable_irq calls. Must be called with
+ * irq_desc->lock held.
+ */
+static inline void irqd_set_chained_irq_inprogress(struct irq_data *d)
+{
+	d->state_use_accessors |= IRQD_IRQ_INPROGRESS;
+}
+
+static inline void irqd_clr_chained_irq_inprogress(struct irq_data *d)
+{
+	d->state_use_accessors &= ~IRQD_IRQ_INPROGRESS;
 }
 
 /**
@@ -400,9 +433,6 @@ static inline void irq_move_masked_irq(struct irq_data *data) { }
 
 extern int no_irq_affinity;
 
-/* Handle irq action chains: */
-extern irqreturn_t handle_IRQ_event(unsigned int irq, struct irqaction *action);
-
 /*
  * Built-in IRQ handlers for various IRQ types,
  * callable via desc->handle_irq()
@@ -410,6 +440,7 @@ extern irqreturn_t handle_IRQ_event(unsigned int irq, struct irqaction *action);
 extern void handle_level_irq(unsigned int irq, struct irq_desc *desc);
 extern void handle_fasteoi_irq(unsigned int irq, struct irq_desc *desc);
 extern void handle_edge_irq(unsigned int irq, struct irq_desc *desc);
+extern void handle_edge_eoi_irq(unsigned int irq, struct irq_desc *desc);
 extern void handle_simple_irq(unsigned int irq, struct irq_desc *desc);
 extern void handle_percpu_irq(unsigned int irq, struct irq_desc *desc);
 extern void handle_bad_irq(unsigned int irq, struct irq_desc *desc);
