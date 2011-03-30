@@ -40,7 +40,6 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 	}
 	return 0;
 }
-
 void free_thread_xstate(struct task_struct *tsk)
 {
 	fpu_free(&tsk->thread.fpu);

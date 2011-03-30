@@ -1,6 +1,7 @@
 menuconfig WL12XX_MENU
 	tristate "TI wl12xx driver support"
 	depends on MAC80211 && EXPERIMENTAL
+	depends on 0
 	---help---
 	  This will enable TI wl12xx driver support for the following chips:
 	  wl1271 and wl1273.
