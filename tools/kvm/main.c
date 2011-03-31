@@ -8,13 +8,12 @@
 
 #include <inttypes.h>
 #include <termios.h>
-#include <unistd.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <stdio.h>
-#include <time.h>
 
 extern bool ioport_debug;
 
@@ -30,46 +29,34 @@ static void usage(char *argv[])
 
 static struct kvm *kvm;
 
-static struct termios tty_origin_stdin;
-static struct termios tty_origin_stdout;
-static struct termios tty_origin_stderr;
+static struct termios orig_term;
 
-static void tty_save_origins(void)
+static void setup_console(void)
 {
-	tcgetattr(fileno(stdin), &tty_origin_stdin);
-	tcgetattr(fileno(stdout), &tty_origin_stdout);
-	tcgetattr(fileno(stderr), &tty_origin_stderr);
+	struct termios term;
+
+	if (tcgetattr(STDIN_FILENO, &orig_term) < 0)
+		die("unable to save initial standard input settings");
+
+	term			= orig_term;
+
+	term.c_lflag		&= ~(ICANON|ECHO);
+
+	tcsetattr(STDIN_FILENO, TCSANOW, &term);
 }
 
-static void tty_restore_origins(void)
+static void cleanup_console(void)
 {
-	tcsetattr(fileno(stdin), TCSAFLUSH, &tty_origin_stdin);
-	tcsetattr(fileno(stdout), TCSAFLUSH, &tty_origin_stdout);
-	tcsetattr(fileno(stderr), TCSAFLUSH, &tty_origin_stderr);
-}
-
-static void tty_set_canon_flag(int fd, int on)
-{
-	struct termios tty;
-	int mask = ISTRIP | INLCR | ICRNL | IGNCR | IXON | IXOFF | ICANON | ECHO;
-
-	tcgetattr(fd, &tty);
-	if (on)
-		tty.c_lflag |= mask;
-	else
-		tty.c_lflag &= ~mask;
-	tcsetattr(fd, TCSAFLUSH, &tty);
+	tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
 }
 
 static void shutdown(void)
 {
-	tty_set_canon_flag(fileno(stdin), 0);
-	tty_restore_origins();
+	cleanup_console();
 }
 
 static void handle_sigint(int sig)
 {
-	shutdown();
 	exit(1);
 }
 
@@ -91,46 +78,6 @@ static bool option_matches(char *arg, const char *option)
 	return !strncmp(arg, option, strlen(option));
 }
 
-#define TIMER_INTERVAL_NS 1000000	/* 1 msec */
-
-static void alarm_handler(int sig)
-{
-}
-
-/*
- * This function sets up a timer that's used to inject interrupts from the
- * userspace hypervisor into the guest at periodical intervals. Please note
- * that clock interrupt, for example, is not handled here.
- */
-static void setup_timer(void)
-{
-	struct itimerspec its;
-	struct sigaction sa;
-	struct sigevent sev;
-	timer_t timerid;
-
-	sigfillset(&sa.sa_mask);
-	sa.sa_flags			= 0;
-	sa.sa_handler			= alarm_handler;
-
-	sigaction(SIGALRM, &sa, NULL);
-
-	memset(&sev, 0, sizeof(struct sigevent));
-	sev.sigev_value.sival_int	= 0;
-	sev.sigev_notify		= SIGEV_SIGNAL;
-	sev.sigev_signo			= SIGALRM;
-
-	its.it_value.tv_sec		= TIMER_INTERVAL_NS / 1000000000;
-	its.it_value.tv_nsec		= TIMER_INTERVAL_NS % 1000000000;
-	its.it_interval.tv_sec		= its.it_value.tv_sec;
-	its.it_interval.tv_nsec		= its.it_value.tv_nsec;
-	if (timer_create(CLOCK_MONOTONIC, &sev, &timerid) < 0)
-		die("timer_create()");
-
-	if (timer_settime(timerid, 0, &its, NULL) < 0)
-		die("timer_settime()");
-}
-
 int main(int argc, char *argv[])
 {
 	const char *kernel_filename = NULL;
@@ -142,12 +89,12 @@ int main(int argc, char *argv[])
 	bool single_step = false;
 	int i;
 
-	tty_save_origins();
-
-	atexit(shutdown);
-
 	signal(SIGQUIT, handle_sigquit);
 	signal(SIGINT, handle_sigint);
+
+	setup_console();
+
+	atexit(shutdown);
 
 	for (i = 1; i < argc; i++) {
 		if (option_matches(argv[i], "--kernel=")) {
@@ -217,14 +164,12 @@ int main(int argc, char *argv[])
 	if (single_step)
 		kvm__enable_singlestep(kvm);
 
-	serial8250__init();
+	serial8250__init(kvm);
 	pci__init();
 
 	blk_virtio__init(kvm);
 
-	setup_timer();
-
-	tty_set_canon_flag(fileno(stdin), 1);
+	kvm__start_timer(kvm);
 
 	for (;;) {
 		kvm__run(kvm);
@@ -245,7 +190,7 @@ int main(int argc, char *argv[])
 					kvm->kvm_run->io.count);
 
 			if (!ret)
-				goto exit_kvm;
+				goto panic_kvm;
 			break;
 		}
 		case KVM_EXIT_MMIO: {
@@ -258,30 +203,34 @@ int main(int argc, char *argv[])
 					kvm->kvm_run->mmio.is_write);
 
 			if (!ret)
-				goto exit_kvm;
+				goto panic_kvm;
 			break;
 		}
 		case KVM_EXIT_INTR: {
 			serial8250__interrupt(kvm);
 			break;
 		}
-		default:
+		case KVM_EXIT_SHUTDOWN:
 			goto exit_kvm;
+		default:
+			goto panic_kvm;
 		}
 	}
-
 exit_kvm:
+	kvm__delete(kvm);
 
+	return 0;
+
+panic_kvm:
 	fprintf(stderr, "KVM exit reason: %" PRIu32 " (\"%s\")\n",
 		kvm->kvm_run->exit_reason, kvm_exit_reasons[kvm->kvm_run->exit_reason]);
 	if (kvm->kvm_run->exit_reason == KVM_EXIT_UNKNOWN)
 		fprintf(stderr, "KVM exit code: 0x%" PRIu64 "\n",
 			kvm->kvm_run->hw.hardware_exit_reason);
-
 	kvm__show_registers(kvm);
 	kvm__show_code(kvm);
 	kvm__show_page_tables(kvm);
 	kvm__delete(kvm);
 
-	return 0;
+	return 1;
 }
