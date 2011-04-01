@@ -1242,3 +1242,148 @@ static struct uprobe_task *add_utask(void)
 	current->utask = utask;
 	return utask;
 }
+
+/* Prepare to single-step probed instruction out of line. */
+static int pre_ssout(struct uprobe *uprobe, struct pt_regs *regs,
+				unsigned long vaddr)
+{
+	xol_get_insn_slot(uprobe, vaddr);
+	BUG_ON(!current->utask->xol_vaddr);
+	if (!pre_xol(uprobe, regs)) {
+		set_ip(regs, current->utask->xol_vaddr);
+		return 0;
+	}
+	return -EFAULT;
+}
+
+/*
+ * Verify from Instruction Pointer if singlestep has indeed occurred.
+ * If Singlestep has occurred, then do post singlestep fix-ups.
+ */
+static bool sstep_complete(struct uprobe *uprobe, struct pt_regs *regs)
+{
+	unsigned long vaddr = instruction_pointer(regs);
+
+	/*
+	 * If we have executed out of line, Instruction pointer
+	 * cannot be same as virtual address of XOL slot.
+	 */
+	if (vaddr == current->utask->xol_vaddr)
+		return false;
+	post_xol(uprobe, regs);
+	return true;
+}
+
+/*
+ * uprobe_notify_resume gets called in task context just before returning
+ * to userspace.
+ *
+ *  If its the first time the probepoint is hit, slot gets allocated here.
+ *  If its the first time the thread hit a breakpoint, utask gets
+ *  allocated here.
+ */
+void uprobe_notify_resume(struct pt_regs *regs)
+{
+	struct vm_area_struct *vma;
+	struct uprobe_task *utask;
+	struct mm_struct *mm;
+	struct uprobe *u = NULL;
+	unsigned long probept;
+
+	utask = current->utask;
+	mm = current->mm;
+	if (unlikely(!utask)) {
+		utask = add_utask();
+
+		/* Failed to allocate utask for the current task. */
+		BUG_ON(!utask);
+		utask->state = UTASK_BP_HIT;
+	}
+	if (utask->state == UTASK_BP_HIT) {
+		probept = uprobes_get_bkpt_addr(regs);
+		down_read(&mm->mmap_sem);
+		for (vma = mm->mmap; vma; vma = vma->vm_next) {
+			if (!valid_vma(vma))
+				continue;
+			if (probept < vma->vm_start || probept > vma->vm_end)
+				continue;
+			u = find_uprobe(vma->vm_file->f_mapping->host,
+					probept - vma->vm_start);
+			break;
+		}
+		up_read(&mm->mmap_sem);
+		/*TODO Return SIGTRAP signal */
+		if (!u) {
+			set_ip(regs, probept);
+			utask->state = UTASK_RUNNING;
+			return;
+		}
+		/* TODO Start queueing signals. */
+		utask->active_uprobe = u;
+		handler_chain(u, regs);
+		utask->state = UTASK_SSTEP;
+		if (!pre_ssout(u, regs, probept))
+			arch_uprobe_enable_sstep(regs);
+	} else if (utask->state == UTASK_SSTEP) {
+		u = utask->active_uprobe;
+		if (sstep_complete(u, regs)) {
+			put_uprobe(u);
+			utask->active_uprobe = NULL;
+			utask->state = UTASK_RUNNING;
+		/* TODO Stop queueing signals. */
+			arch_uprobe_disable_sstep(regs);
+		}
+	}
+}
+
+/*
+ * uprobe_bkpt_notifier gets called from interrupt context
+ * it gets a reference to the ppt and sets TIF_UPROBE flag,
+ */
+int uprobe_bkpt_notifier(struct pt_regs *regs)
+{
+	struct uprobe_task *utask;
+
+	if (!current->mm || !atomic_read(&current->mm->uprobes_count))
+		/* task is currently not uprobed */
+		return 0;
+
+	utask = current->utask;
+	if (utask)
+		utask->state = UTASK_BP_HIT;
+	set_thread_flag(TIF_UPROBE);
+	return 1;
+}
+
+/*
+ * uprobe_post_notifier gets called in interrupt context.
+ * It completes the single step operation.
+ */
+int uprobe_post_notifier(struct pt_regs *regs)
+{
+	struct uprobe *uprobe;
+	struct uprobe_task *utask;
+
+	if (!current->mm || !current->utask || !current->utask->active_uprobe)
+		/* task is currently not uprobed */
+		return 0;
+
+	utask = current->utask;
+	uprobe = utask->active_uprobe;
+	if (!uprobe)
+		return 0;
+
+	if (uprobes_resume_can_sleep(uprobe)) {
+		set_thread_flag(TIF_UPROBE);
+		return 1;
+	}
+	if (sstep_complete(uprobe, regs)) {
+		put_uprobe(uprobe);
+		utask->active_uprobe = NULL;
+		utask->state = UTASK_RUNNING;
+		/* TODO Stop queueing signals. */
+		arch_uprobe_disable_sstep(regs);
+		return 1;
+	}
+	return 0;
+}

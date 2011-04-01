@@ -160,6 +160,9 @@ extern int uprobe_mmap(struct vm_area_struct *vma);
 extern unsigned long uprobes_get_bkpt_addr(struct pt_regs *regs);
 extern void uprobe_dup_mmap(struct mm_struct *old_mm, struct mm_struct *mm);
 extern void uprobes_free_xol_area(struct mm_struct *mm);
+extern int uprobe_post_notifier(struct pt_regs *regs);
+extern int uprobe_bkpt_notifier(struct pt_regs *regs);
+extern void uprobe_notify_resume(struct pt_regs *regs);
 #else /* CONFIG_UPROBES is not defined */
 static inline int register_uprobe(struct inode *inode, loff_t offset,
 				struct uprobe_consumer *consumer)
@@ -180,6 +183,7 @@ static inline int uprobe_mmap(struct vm_area_struct *vma)
 }
 static inline void uprobe_free_utask(struct task_struct *tsk) {}
 static inline void uprobes_free_xol_area(struct mm_struct *mm) {}
+static inline void uprobe_notify_resume(struct pt_regs *regs) {}
 static inline unsigned long uprobes_get_bkpt_addr(struct pt_regs *regs)
 {
 	return 0;
