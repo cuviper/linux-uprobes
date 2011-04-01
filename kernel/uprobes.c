@@ -1389,6 +1389,56 @@ int uprobe_post_notifier(struct pt_regs *regs)
 	return 0;
 }
 
+bool uprobes_pid_filter(struct uprobe_consumer *self, struct task_struct *t)
+{
+	struct uprobe_simple_consumer *usc;
+
+	usc = container_of(self, struct uprobe_simple_consumer, consumer);
+	if (t->tgid == usc->fvalue)
+		return true;
+	return false;
+}
+
+bool uprobes_tid_filter(struct uprobe_consumer *self, struct task_struct *t)
+{
+	struct uprobe_simple_consumer *usc;
+
+	usc = container_of(self, struct uprobe_simple_consumer, consumer);
+	if (t->pid == usc->fvalue)
+		return true;
+	return false;
+}
+
+bool uprobes_ppid_filter(struct uprobe_consumer *self, struct task_struct *t)
+{
+	pid_t pid;
+	struct uprobe_simple_consumer *usc;
+
+	usc = container_of(self, struct uprobe_simple_consumer, consumer);
+	rcu_read_lock();
+	pid = task_tgid_vnr(t->real_parent);
+	rcu_read_unlock();
+
+	if (pid == usc->fvalue)
+		return true;
+	return false;
+}
+
+bool uprobes_sid_filter(struct uprobe_consumer *self, struct task_struct *t)
+{
+	pid_t pid;
+	struct uprobe_simple_consumer *usc;
+
+	usc = container_of(self, struct uprobe_simple_consumer, consumer);
+	rcu_read_lock();
+	pid = pid_vnr(task_session(t));
+	rcu_read_unlock();
+
+	if (pid == usc->fvalue)
+		return true;
+	return false;
+}
+
 struct notifier_block uprobes_exception_nb = {
 	.notifier_call = uprobes_exception_notify,
 	.priority = 0x7ffffff0,

@@ -65,6 +65,11 @@ struct uprobe_consumer {
 	struct uprobe_consumer *next;
 };
 
+struct uprobe_simple_consumer {
+	struct uprobe_consumer consumer;
+	pid_t fvalue;
+};
+
 struct uprobe {
 	struct rb_node		rb_node;	/* node in the rb tree */
 	atomic_t		ref;
