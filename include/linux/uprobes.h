@@ -23,6 +23,7 @@
  *	Jim Keniston
  */
 
+#include <linux/rbtree.h>
 #ifdef CONFIG_ARCH_SUPPORTS_UPROBES
 #include <asm/uprobes.h>
 #else
@@ -49,6 +50,17 @@ typedef u8 uprobe_opcode_t;
 
 /* Unexported functions & macros for use by arch-specific code */
 #define uprobe_opcode_sz (sizeof(uprobe_opcode_t))
+
+struct uprobe_consumer {
+	int (*handler)(struct uprobe_consumer *self, struct pt_regs *regs);
+	/*
+	 * filter is optional; If a filter exists, handler is run
+	 * if and only if filter returns true.
+	 */
+	bool (*filter)(struct uprobe_consumer *self, struct task_struct *task);
+
+	struct uprobe_consumer *next;
+};
 
 /*
  * Most architectures can use the default versions of @read_opcode(),

@@ -33,9 +33,27 @@
 #include <linux/rmap.h> /* needed for anon_vma_prepare */
 
 struct uprobe {
+	struct rb_node		rb_node;	/* node in the rb tree */
+	atomic_t		ref;		/* lifetime muck */
+	struct rw_semaphore	consumer_rwsem;
+	struct uprobe_consumer	*consumers;
+	struct inode		*inode;		/* we hold a ref */
+	loff_t			offset;
 	u8			insn[MAX_UINSN_BYTES];
 	u16			fixups;
 };
+
+static bool valid_vma(struct vm_area_struct *vma)
+{
+	if (!vma->vm_file)
+		return false;
+
+	if ((vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)) ==
+						(VM_READ|VM_EXEC))
+		return true;
+
+	return false;
+}
 
 /*
  * NOTE:
@@ -83,8 +101,7 @@ static int write_opcode(struct task_struct *tsk, struct uprobe * uprobe,
 	 * adding probes in write mapped pages since the breakpoints
 	 * might end up in the file copy.
 	 */
-	if ((vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)) !=
-						(VM_READ|VM_EXEC))
+	if (!valid_vma(vma))
 		goto put_out;
 
 	/* Allocate a page */
@@ -164,8 +181,7 @@ int __weak read_opcode(struct task_struct *tsk, unsigned long vaddr,
 	 * adding probes in write mapped pages since the breakpoints
 	 * might end up in the file copy.
 	 */
-	if ((vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)) !=
-						(VM_READ|VM_EXEC))
+	if (!valid_vma(vma))
 		goto put_out;
 
 	lock_page(page);
@@ -251,4 +267,206 @@ bool __weak is_bkpt_insn(u8 *insn)
 
 	memcpy(&opcode, insn, UPROBES_BKPT_INSN_SIZE);
 	return (opcode == UPROBES_BKPT_INSN);
+}
+
+static struct rb_root uprobes_tree = RB_ROOT;
+static DEFINE_SPINLOCK(treelock);
+
+static int match_inode(struct uprobe *uprobe, struct inode *inode,
+						struct rb_node **p)
+{
+	struct rb_node *n = *p;
+
+	if (inode < uprobe->inode)
+		*p = n->rb_left;
+	else if (inode > uprobe->inode)
+		*p = n->rb_right;
+	else
+		return 1;
+	return 0;
+}
+
+static int match_offset(struct uprobe *uprobe, loff_t offset,
+						struct rb_node **p)
+{
+	struct rb_node *n = *p;
+
+	if (offset < uprobe->offset)
+		*p = n->rb_left;
+	else if (offset > uprobe->offset)
+		*p = n->rb_right;
+	else
+		return 1;
+	return 0;
+}
+
+
+/* Called with treelock held */
+static struct uprobe *__find_uprobe(struct inode * inode,
+			 loff_t offset, struct rb_node **near_match)
+{
+	struct rb_node *n = uprobes_tree.rb_node;
+	struct uprobe *uprobe, *u = NULL;
+
+	while (n) {
+		uprobe = rb_entry(n, struct uprobe, rb_node);
+		if (match_inode(uprobe, inode, &n)) {
+			if (near_match)
+				*near_match = n;
+			if (match_offset(uprobe, offset, &n)) {
+				/* get access ref */
+				atomic_inc(&uprobe->ref);
+				u = uprobe;
+				break;
+			}
+		}
+	}
+	return u;
+}
+
+/*
+ * Find a uprobe corresponding to a given inode:offset
+ * Acquires treelock
+ */
+static struct uprobe *find_uprobe(struct inode * inode, loff_t offset)
+{
+	struct uprobe *uprobe;
+	unsigned long flags;
+
+	spin_lock_irqsave(&treelock, flags);
+	uprobe = __find_uprobe(inode, offset, NULL);
+	spin_unlock_irqrestore(&treelock, flags);
+	return uprobe;
+}
+
+/*
+ * Acquires treelock.
+ * Matching uprobe already exists in rbtree;
+ *	increment (access refcount) and return the matching uprobe.
+ *
+ * No matching uprobe; insert the uprobe in rb_tree;
+ *	get a double refcount (access + creation) and return NULL.
+ */
+static struct uprobe *insert_uprobe(struct uprobe *uprobe)
+{
+	struct rb_node **p = &uprobes_tree.rb_node;
+	struct rb_node *parent = NULL;
+	struct uprobe *u;
+	unsigned long flags;
+
+	spin_lock_irqsave(&treelock, flags);
+	while (*p) {
+		parent = *p;
+		u = rb_entry(parent, struct uprobe, rb_node);
+		if (u->inode > uprobe->inode)
+			p = &(*p)->rb_left;
+		else if (u->inode < uprobe->inode)
+			p = &(*p)->rb_right;
+		else {
+			if (u->offset > uprobe->offset)
+				p = &(*p)->rb_left;
+			else if (u->offset < uprobe->offset)
+				p = &(*p)->rb_right;
+			else {
+				/* get access ref */
+				atomic_inc(&u->ref);
+				goto unlock_return;
+			}
+		}
+	}
+	u = NULL;
+	rb_link_node(&uprobe->rb_node, parent, p);
+	rb_insert_color(&uprobe->rb_node, &uprobes_tree);
+	/* get access + drop ref */
+	atomic_set(&uprobe->ref, 2);
+
+unlock_return:
+	spin_unlock_irqrestore(&treelock, flags);
+	return u;
+}
+
+static void put_uprobe(struct uprobe *uprobe)
+{
+	if (atomic_dec_and_test(&uprobe->ref))
+		kfree(uprobe);
+}
+
+static struct uprobe *uprobes_add(struct inode *inode, loff_t offset)
+{
+	struct uprobe *uprobe, *cur_uprobe;
+
+	uprobe = kzalloc(sizeof(struct uprobe), GFP_KERNEL);
+	if (!uprobe)
+		return NULL;
+
+	__iget(inode);
+	uprobe->inode = inode;
+	uprobe->offset = offset;
+	init_rwsem(&uprobe->consumer_rwsem);
+
+	/* add to uprobes_tree, sorted on inode:offset */
+	cur_uprobe = insert_uprobe(uprobe);
+
+	/* a uprobe exists for this inode:offset combination*/
+	if (cur_uprobe) {
+		kfree(uprobe);
+		uprobe = cur_uprobe;
+		iput(inode);
+	}
+	return uprobe;
+}
+
+static void handler_chain(struct uprobe *uprobe, struct pt_regs *regs)
+{
+	struct uprobe_consumer *consumer;
+
+	down_read(&uprobe->consumer_rwsem);
+	consumer = uprobe->consumers;
+	while (consumer) {
+		if (!consumer->filter || consumer->filter(consumer, current))
+			consumer->handler(consumer, regs);
+
+		consumer = consumer->next;
+	}
+	up_read(&uprobe->consumer_rwsem);
+}
+
+static void add_consumer(struct uprobe *uprobe,
+				struct uprobe_consumer *consumer)
+{
+	down_write(&uprobe->consumer_rwsem);
+	consumer->next = uprobe->consumers;
+	uprobe->consumers = consumer;
+	up_write(&uprobe->consumer_rwsem);
+}
+
+/*
+ * For uprobe @uprobe, delete the consumer @consumer.
+ * Return true if the @consumer is deleted successfully
+ * or return false.
+ */
+static bool del_consumer(struct uprobe *uprobe,
+				struct uprobe_consumer *consumer)
+{
+	struct uprobe_consumer *con;
+	bool ret = false;
+
+	down_write(&uprobe->consumer_rwsem);
+	con = uprobe->consumers;
+	if (consumer == con) {
+		uprobe->consumers = con->next;
+		if (!con->next)
+			put_uprobe(uprobe); /* drop creation ref */
+		ret = true;
+	} else {
+		for (; con; con = con->next) {
+			if (con->next == consumer) {
+				con->next = consumer->next;
+				ret = true;
+				break;
+			}
+		}
+	}
+	up_write(&uprobe->consumer_rwsem);
+	return ret;
 }
