@@ -211,6 +211,7 @@ char dso__symtab_origin(const struct dso *self);
 void dso__set_long_name(struct dso *self, char *name);
 void dso__set_build_id(struct dso *self, void *build_id);
 void dso__read_running_kernel_build_id(struct dso *self, struct machine *machine);
+struct map *dso__new_map(const char *name);
 struct symbol *dso__find_symbol(struct dso *self, enum map_type type, u64 addr);
 struct symbol *dso__find_symbol_by_name(struct dso *self, enum map_type type,
 					const char *name);
