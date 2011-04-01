@@ -37,4 +37,6 @@ struct uprobe_arch_info {
 #else
 struct uprobe_arch_info {};
 #endif
+struct uprobe;
+extern int analyze_insn(struct task_struct *tsk, struct uprobe *uprobe);
 #endif	/* _ASM_UPROBES_H */
