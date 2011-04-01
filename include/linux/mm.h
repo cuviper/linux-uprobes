@@ -1008,6 +1008,8 @@ void account_page_writeback(struct page *page);
 int set_page_dirty(struct page *page);
 int set_page_dirty_lock(struct page *page);
 int clear_page_dirty_for_io(struct page *page);
+int replace_page(struct vm_area_struct *vma, struct page *page,
+					struct page *kpage, pte_t orig_pte);
 
 /* Is the vma a continuation of the stack vma above it? */
 static inline int vma_stack_continue(struct vm_area_struct *vma, unsigned long addr)
