@@ -404,6 +404,7 @@ static struct uprobe *uprobes_add(struct inode *inode, loff_t offset)
 	uprobe->inode = inode;
 	uprobe->offset = offset;
 	init_rwsem(&uprobe->consumer_rwsem);
+	INIT_LIST_HEAD(&uprobe->pending_list);
 
 	/* add to uprobes_tree, sorted on inode:offset */
 	cur_uprobe = insert_uprobe(uprobe);
@@ -472,17 +473,32 @@ static bool del_consumer(struct uprobe *uprobe,
 	return ret;
 }
 
-static int __copy_insn(struct address_space *mapping, char *insn,
-			unsigned long nbytes, unsigned long offset)
+static int __copy_insn(struct address_space *mapping,
+		struct vm_area_struct *vma, char *insn,
+		unsigned long nbytes, unsigned long offset)
 {
 	struct page *page;
 	void *vaddr;
 	unsigned long off1;
-	loff_t idx;
+	unsigned long idx;
 
-	idx = offset >> PAGE_CACHE_SHIFT;
+	idx = (unsigned long) (offset >> PAGE_CACHE_SHIFT);
 	off1 = offset &= ~PAGE_MASK;
-	page = grab_cache_page(mapping, (unsigned long)idx);
+	if (vma) {
+		/*
+		 * We get here from uprobe_mmap() -- the case where we
+		 * are trying to copy an instruction from a page that's
+		 * not yet in page cache.
+		 *
+		 * Read page in before copy.
+		 */
+		struct file *filp = vma->vm_file;
+
+		if (!filp)
+			return -EINVAL;
+		page_cache_sync_readahead(mapping, &filp->f_ra, filp, idx, 1);
+	}
+	page = grab_cache_page(mapping, idx);
 	if (!page)
 		return -ENOMEM;
 
@@ -494,7 +510,8 @@ static int __copy_insn(struct address_space *mapping, char *insn,
 	return 0;
 }
 
-static int copy_insn(struct uprobe *uprobe, unsigned long addr)
+static int copy_insn(struct uprobe *uprobe, struct vm_area_struct *vma,
+					unsigned long addr)
 {
 	struct address_space *mapping;
 	int bytes;
@@ -512,12 +529,12 @@ static int copy_insn(struct uprobe *uprobe, unsigned long addr)
 
 	/* Instruction at the page-boundary; copy bytes in second page */
 	if (nbytes < bytes) {
-		if (__copy_insn(mapping, uprobe->insn + nbytes,
+		if (__copy_insn(mapping, vma, uprobe->insn + nbytes,
 				bytes - nbytes, uprobe->offset + nbytes))
 			return -ENOMEM;
 		bytes = nbytes;
 	}
-	return __copy_insn(mapping, uprobe->insn, bytes, uprobe->offset);
+	return __copy_insn(mapping, vma, uprobe->insn, bytes, uprobe->offset);
 }
 
 static struct task_struct *uprobes_get_mm_owner(struct mm_struct *mm)
@@ -532,7 +549,8 @@ static struct task_struct *uprobes_get_mm_owner(struct mm_struct *mm)
 	return tsk;
 }
 
-static int install_uprobe(struct mm_struct *mm, struct uprobe *uprobe)
+static int install_uprobe(struct mm_struct *mm, struct uprobe *uprobe,
+		struct vm_area_struct *vma)
 {
 	struct task_struct *tsk = uprobes_get_mm_owner(mm);
 	int ret;
@@ -541,7 +559,7 @@ static int install_uprobe(struct mm_struct *mm, struct uprobe *uprobe)
 		return -ESRCH;
 
 	if (!uprobe->copy) {
-		ret = copy_insn(uprobe, mm->uprobes_vaddr);
+		ret = copy_insn(uprobe, vma, mm->uprobes_vaddr);
 		if (ret)
 			goto put_return;
 		if (is_bkpt_insn(uprobe->insn)) {
@@ -698,7 +716,7 @@ int register_uprobe(struct inode *inode, loff_t offset,
 	}
 	list_for_each_entry_safe(mm, tmpmm, &try_list, uprobes_list) {
 		down_read(&mm->mmap_sem);
-		ret = install_uprobe(mm, uprobe);
+		ret = install_uprobe(mm, uprobe, NULL);
 
 		if (ret && (ret != -ESRCH || ret != -EEXIST)) {
 			up_read(&mm->mmap_sem);
@@ -832,4 +850,108 @@ void unregister_uprobe(struct inode *inode, loff_t offset,
 put_unlock:
 	mutex_unlock(&uprobes_mutex);
 	put_uprobe(uprobe); /* drop access ref */
+}
+
+static void add_to_temp_list(struct vm_area_struct *vma, struct inode *inode,
+		struct list_head *tmp_list)
+{
+	struct uprobe *uprobe;
+	struct rb_node *n;
+	unsigned long flags;
+
+	n = uprobes_tree.rb_node;
+	spin_lock_irqsave(&treelock, flags);
+	uprobe = __find_uprobe(inode, 0, &n);
+	for (; n; n = rb_next(n)) {
+		uprobe = rb_entry(n, struct uprobe, rb_node);
+		if (match_inode(uprobe, inode, &n)) {
+			list_add(&uprobe->pending_list, tmp_list);
+			continue;
+		}
+		break;
+	}
+	spin_unlock_irqrestore(&treelock, flags);
+}
+
+/*
+ * Called from dup_mmap.
+ * called with mm->mmap_sem and old_mm->mmap_sem acquired.
+ */
+void uprobe_dup_mmap(struct mm_struct *old_mm, struct mm_struct *mm)
+{
+	atomic_set(&old_mm->uprobes_count,
+			atomic_read(&mm->uprobes_count));
+}
+
+/*
+ * Called from mmap_region.
+ * called with mm->mmap_sem acquired.
+ *
+ * Return -ve no if we fail to insert probes and we cannot
+ * bail-out.
+ * Return 0 otherwise. i.e :
+ *	- successful insertion of probes
+ *	- no possible probes to be inserted.
+ *	- insertion of probes failed but we can bail-out.
+ */
+int uprobe_mmap(struct vm_area_struct *vma)
+{
+	struct list_head tmp_list;
+	struct uprobe *uprobe, *u;
+	struct mm_struct *mm;
+	struct inode *inode;
+	unsigned long start;
+	unsigned long pgoff;
+	int ret = 0;
+
+	if (!valid_vma(vma))
+		return ret;	/* Bail-out */
+
+	INIT_LIST_HEAD(&tmp_list);
+
+	mm = vma->vm_mm;
+	inode = vma->vm_file->f_mapping->host;
+	start = vma->vm_start;
+	pgoff = vma->vm_pgoff;
+	__iget(inode);
+
+	up_write(&mm->mmap_sem);
+	mutex_lock(&uprobes_mutex);
+	down_read(&mm->mmap_sem);
+
+	vma = find_vma(mm, start);
+	/* Not the same vma */
+	if (!vma || vma->vm_start != start ||
+			vma->vm_pgoff != pgoff || !valid_vma(vma) ||
+			inode->i_mapping != vma->vm_file->f_mapping)
+		goto mmap_out;
+
+	add_to_temp_list(vma, inode, &tmp_list);
+	list_for_each_entry_safe(uprobe, u, &tmp_list, pending_list) {
+		loff_t vaddr;
+
+		list_del(&uprobe->pending_list);
+		if (ret)
+			continue;
+
+		vaddr = vma->vm_start + uprobe->offset;
+		vaddr -= vma->vm_pgoff << PAGE_SHIFT;
+		if (vaddr > ULONG_MAX)
+			/*
+			 * We cannot have a virtual address that is
+			 * greater than ULONG_MAX
+			 */
+			continue;
+		mm->uprobes_vaddr = (unsigned long)vaddr;
+		ret = install_uprobe(mm, uprobe, vma);
+		if (ret && (ret == -ESRCH || ret == -EEXIST))
+			ret = 0;
+	}
+
+mmap_out:
+	mutex_unlock(&uprobes_mutex);
+	iput(inode);
+	up_read(&mm->mmap_sem);
+	down_write(&mm->mmap_sem);
+	return ret;
 }
