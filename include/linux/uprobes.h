@@ -157,6 +157,7 @@ extern void uprobe_free_utask(struct task_struct *tsk);
 
 struct vm_area_struct;
 extern int uprobe_mmap(struct vm_area_struct *vma);
+extern unsigned long uprobes_get_bkpt_addr(struct pt_regs *regs);
 extern void uprobe_dup_mmap(struct mm_struct *old_mm, struct mm_struct *mm);
 extern void uprobes_free_xol_area(struct mm_struct *mm);
 #else /* CONFIG_UPROBES is not defined */
@@ -179,5 +180,9 @@ static inline int uprobe_mmap(struct vm_area_struct *vma)
 }
 static inline void uprobe_free_utask(struct task_struct *tsk) {}
 static inline void uprobes_free_xol_area(struct mm_struct *mm) {}
+static inline unsigned long uprobes_get_bkpt_addr(struct pt_regs *regs)
+{
+	return 0;
+}
 #endif /* CONFIG_UPROBES */
 #endif	/* _LINUX_UPROBES_H */
