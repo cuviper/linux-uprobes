@@ -31,11 +31,27 @@
 #include <linux/slab.h>
 #include <linux/uprobes.h>
 #include <linux/rmap.h> /* needed for anon_vma_prepare */
+#include <linux/mman.h>	/* needed for PROT_EXEC, MAP_PRIVATE */
+#include <linux/file.h> /* needed for fput() */
 
+#define UINSNS_PER_PAGE	(PAGE_SIZE/UPROBES_XOL_SLOT_BYTES)
+#define MAX_UPROBES_XOL_SLOTS UINSNS_PER_PAGE
+
+/*
+ * valid_vma: Verify if the specified vma is an executable vma,
+ * but not an XOL vma.
+ *	- Return 1 if the specified virtual address is in an
+ *	  executable vma, but not in an XOL vma.
+ */
 static bool valid_vma(struct vm_area_struct *vma)
 {
+	struct uprobes_xol_area *area = vma->vm_mm->uprobes_xol_area;
+
 	if (!vma->vm_file)
 		return false;
+
+	if (area && (area->vaddr == vma->vm_start))
+			return false;
 
 	if ((vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)) ==
 						(VM_READ|VM_EXEC))
@@ -956,6 +972,224 @@ mmap_out:
 	return ret;
 }
 
+/* Slot allocation for XOL */
+
+static int xol_add_vma(struct uprobes_xol_area *area)
+{
+	struct vm_area_struct *vma;
+	struct mm_struct *mm;
+	struct file *file;
+	unsigned long addr;
+	int ret = -ENOMEM;
+
+	mm = get_task_mm(current);
+	if (!mm)
+		return -ESRCH;
+
+	down_write(&mm->mmap_sem);
+	if (mm->uprobes_xol_area) {
+		ret = -EALREADY;
+		goto fail;
+	}
+
+	/*
+	 * Find the end of the top mapping and skip a page.
+	 * If there is no space for PAGE_SIZE above
+	 * that, mmap will ignore our address hint.
+	 *
+	 * We allocate a "fake" unlinked shmem file because
+	 * anonymous memory might not be granted execute
+	 * permission when the selinux security hooks have
+	 * their way.
+	 */
+	vma = rb_entry(rb_last(&mm->mm_rb), struct vm_area_struct, vm_rb);
+	addr = vma->vm_end + PAGE_SIZE;
+	file = shmem_file_setup("uprobes/xol", PAGE_SIZE, VM_NORESERVE);
+	if (!file) {
+		printk(KERN_ERR "uprobes_xol failed to setup shmem_file "
+			"while allocating vma for pid/tgid %d/%d for "
+			"single-stepping out of line.\n",
+			current->pid, current->tgid);
+		goto fail;
+	}
+	addr = do_mmap_pgoff(file, addr, PAGE_SIZE, PROT_EXEC, MAP_PRIVATE, 0);
+	fput(file);
+
+	if (addr & ~PAGE_MASK) {
+		printk(KERN_ERR "uprobes_xol failed to allocate a vma for "
+				"pid/tgid %d/%d for single-stepping out of "
+				"line.\n", current->pid, current->tgid);
+		goto fail;
+	}
+	vma = find_vma(mm, addr);
+
+	/* Don't expand vma on mremap(). */
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTCOPY;
+	area->vaddr = vma->vm_start;
+	if (get_user_pages(current, mm, area->vaddr, 1, 1, 1, &area->page,
+				&vma) > 0)
+		ret = 0;
+
+fail:
+	up_write(&mm->mmap_sem);
+	mmput(mm);
+	return ret;
+}
+
+/*
+ * xol_alloc_area - Allocate process's uprobes_xol_area.
+ * This area will be used for storing instructions for execution out of
+ * line.
+ *
+ * Returns the allocated area or NULL.
+ */
+static struct uprobes_xol_area *xol_alloc_area(void)
+{
+	struct uprobes_xol_area *area = NULL;
+
+	area = kzalloc(sizeof(*area), GFP_KERNEL);
+	if (unlikely(!area))
+		return NULL;
+
+	area->bitmap = kzalloc(BITS_TO_LONGS(UINSNS_PER_PAGE) * sizeof(long),
+								GFP_KERNEL);
+
+	if (!area->bitmap)
+		goto fail;
+
+	spin_lock_init(&area->slot_lock);
+	if (!xol_add_vma(area) && !current->mm->uprobes_xol_area) {
+		task_lock(current);
+		if (!current->mm->uprobes_xol_area) {
+			current->mm->uprobes_xol_area = area;
+			task_unlock(current);
+			return area;
+		}
+		task_unlock(current);
+	}
+
+fail:
+	kfree(area->bitmap);
+	kfree(area);
+	return current->mm->uprobes_xol_area;
+}
+
+/*
+ * uprobes_free_xol_area - Free the area allocated for slots.
+ */
+void uprobes_free_xol_area(struct mm_struct *mm)
+{
+	struct uprobes_xol_area *area = mm->uprobes_xol_area;
+
+	if (!area)
+		return;
+
+	put_page(area->page);
+	kfree(area->bitmap);
+	kfree(area);
+}
+
+/*
+ * Find a slot
+ *  - searching in existing vmas for a free slot.
+ *  - If no free slot in existing vmas, return 0;
+ *
+ * Called when holding uprobes_xol_area->slot_lock
+ */
+static unsigned long xol_take_insn_slot(struct uprobes_xol_area *area)
+{
+	unsigned long slot_addr;
+	int slot_nr;
+
+	slot_nr = find_first_zero_bit(area->bitmap, UINSNS_PER_PAGE);
+	if (slot_nr < UINSNS_PER_PAGE) {
+		__set_bit(slot_nr, area->bitmap);
+		slot_addr = area->vaddr +
+				(slot_nr * UPROBES_XOL_SLOT_BYTES);
+		return slot_addr;
+	}
+
+	return 0;
+}
+
+/*
+ * xol_get_insn_slot - If was not allocated a slot, then
+ * allocate a slot.
+ * Returns the allocated slot address or 0.
+ */
+static unsigned long xol_get_insn_slot(struct uprobe *uprobe,
+					unsigned long slot_addr)
+{
+	struct uprobes_xol_area *area = current->mm->uprobes_xol_area;
+	unsigned long flags, xol_vaddr = current->utask->xol_vaddr;
+	void *vaddr;
+
+	if (!current->utask->xol_vaddr || !area) {
+		if (!area)
+			area = xol_alloc_area();
+
+		if (!area)
+			return 0;
+
+		spin_lock_irqsave(&area->slot_lock, flags);
+		xol_vaddr = xol_take_insn_slot(area);
+		spin_unlock_irqrestore(&area->slot_lock, flags);
+		current->utask->xol_vaddr = xol_vaddr;
+	}
+
+	/*
+	 * Initialize the slot if xol_vaddr points to valid
+	 * instruction slot.
+	 */
+	if (unlikely(!xol_vaddr))
+		return 0;
+
+	current->utask->vaddr = slot_addr;
+	vaddr = kmap_atomic(area->page, KM_USER0);
+	xol_vaddr &= ~PAGE_MASK;
+	memcpy(vaddr + xol_vaddr, uprobe->insn, MAX_UINSN_BYTES);
+	kunmap_atomic(vaddr, KM_USER0);
+	return current->utask->xol_vaddr;
+}
+
+/*
+ * xol_free_insn_slot - If slot was earlier allocated by
+ * @xol_get_insn_slot(), make the slot available for
+ * subsequent requests.
+ */
+static void xol_free_insn_slot(struct task_struct *tsk, unsigned long slot_addr)
+{
+	struct uprobes_xol_area *area;
+	unsigned long vma_end;
+
+	if (!tsk->mm || !tsk->mm->uprobes_xol_area)
+		return;
+
+	area = tsk->mm->uprobes_xol_area;
+
+	if (unlikely(!slot_addr || IS_ERR_VALUE(slot_addr)))
+		return;
+
+	vma_end = area->vaddr + PAGE_SIZE;
+	if (area->vaddr <= slot_addr && slot_addr < vma_end) {
+		int slot_nr;
+		unsigned long offset = slot_addr - area->vaddr;
+		unsigned long flags;
+
+		BUG_ON(offset % UPROBES_XOL_SLOT_BYTES);
+
+		slot_nr = offset / UPROBES_XOL_SLOT_BYTES;
+		BUG_ON(slot_nr >= UINSNS_PER_PAGE);
+
+		spin_lock_irqsave(&area->slot_lock, flags);
+		__clear_bit(slot_nr, area->bitmap);
+		spin_unlock_irqrestore(&area->slot_lock, flags);
+		return;
+	}
+	printk(KERN_ERR "%s: no XOL vma for slot address %#lx\n",
+						__func__, slot_addr);
+}
+
 /*
  * Called with no locks held.
  * Called in context of a exiting or a exec-ing thread.
@@ -963,14 +1197,18 @@ mmap_out:
 void uprobe_free_utask(struct task_struct *tsk)
 {
 	struct uprobe_task *utask = tsk->utask;
+	unsigned long xol_vaddr;
 
 	if (!utask)
 		return;
 
+	xol_vaddr = utask->xol_vaddr;
 	if (utask->active_uprobe)
 		put_uprobe(utask->active_uprobe);
+
 	kfree(utask);
 	tsk->utask = NULL;
+	xol_free_insn_slot(tsk, xol_vaddr);
 }
 
 /*
