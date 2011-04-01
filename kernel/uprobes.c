@@ -33,6 +33,7 @@
 #include <linux/rmap.h> /* needed for anon_vma_prepare */
 #include <linux/mman.h>	/* needed for PROT_EXEC, MAP_PRIVATE */
 #include <linux/file.h> /* needed for fput() */
+#include <linux/kdebug.h> /* needed for notifier mechanism */
 
 #define UINSNS_PER_PAGE	(PAGE_SIZE/UPROBES_XOL_SLOT_BYTES)
 #define MAX_UPROBES_XOL_SLOTS UINSNS_PER_PAGE
@@ -1387,3 +1388,20 @@ int uprobe_post_notifier(struct pt_regs *regs)
 	}
 	return 0;
 }
+
+struct notifier_block uprobes_exception_nb = {
+	.notifier_call = uprobes_exception_notify,
+	.priority = 0x7ffffff0,
+};
+
+static int __init init_uprobes(void)
+{
+	return register_die_notifier(&uprobes_exception_nb);
+}
+
+static void __exit exit_uprobes(void)
+{
+}
+
+module_init(init_uprobes);
+module_exit(exit_uprobes);
