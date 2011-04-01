@@ -76,6 +76,8 @@ OPTIONS
 -F::
 --funcs::
 	Show available functions in given module or kernel.
+	With -x/--exe, can also list functions in a user space executable /
+	shared library.
 
 --filter=FILTER::
 	(Only for --vars and --funcs) Set filter. FILTER is a combination of glob
@@ -96,12 +98,21 @@ OPTIONS
 --max-probes::
 	Set the maximum number of probe points for an event. Default is 128.
 
+-u::
+--uprobes::
+	Specify a uprobe based probe point.
+
+-x::
+--exe=PATH::
+	Specify path to the executable or shared library file for user
+	space tracing. Used with --funcs option only.
+
 PROBE SYNTAX
 ------------
 Probe points are defined by following syntax.
 
     1) Define event based on function name
-     [EVENT=]FUNC[@SRC][:RLN|+OFFS|%return|;PTN] [ARG ...]
+     [EVENT=]FUNC[@EXE][@SRC][:RLN|+OFFS|%return|;PTN] [ARG ...]
 
     2) Define event based on source file with line number
      [EVENT=]SRC:ALN [ARG ...]
@@ -112,6 +123,7 @@ Probe points are defined by following syntax.
 
 'EVENT' specifies the name of new event, if omitted, it will be set the name of the probed function. Currently, event group name is set as 'probe'.
 'FUNC' specifies a probed function name, and it may have one of the following options; '+OFFS' is the offset from function entry address in bytes, ':RLN' is the relative-line number from function entry line, and '%return' means that it probes function return. And ';PTN' means lazy matching pattern (see LAZY MATCHING). Note that ';PTN' must be the end of the probe point definition.  In addition, '@SRC' specifies a source file which has that function.
+'EXE' specifies the absolute or relative path of the user space executable or user space shared library.
 It is also possible to specify a probe point by the source line number or lazy matching by using 'SRC:ALN' or 'SRC;PTN' syntax, where 'SRC' is the source file path, ':ALN' is the line number and ';PTN' is the lazy matching pattern.
 'ARG' specifies the arguments of this probe point, (see PROBE ARGUMENT).
 
@@ -180,6 +192,13 @@ Delete all probes on schedule().
 
  ./perf probe --del='schedule*'
 
+Add probes at zfree() function on /bin/zsh
+
+ ./perf probe -u zfree@/bin/zsh
+
+Add probes at malloc() function on libc
+
+ ./perf probe -u malloc@/lib/libc.so.6
 
 SEE ALSO
 --------
