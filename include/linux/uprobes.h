@@ -31,6 +31,7 @@
  * ARCH_SUPPORTS_UPROBES is not defined.
  */
 typedef u8 uprobe_opcode_t;
+struct uprobe_arch_info	{};		/* arch specific info*/
 #endif /* CONFIG_ARCH_SUPPORTS_UPROBES */
 
 /* Post-execution fixups.  Some architectures may define others. */
@@ -62,6 +63,19 @@ struct uprobe_consumer {
 	struct uprobe_consumer *next;
 };
 
+struct uprobe {
+	struct rb_node		rb_node;	/* node in the rb tree */
+	atomic_t		ref;
+	struct rw_semaphore	consumer_rwsem;
+	struct uprobe_arch_info	arch_info;	/* arch specific info if any */
+	struct uprobe_consumer	*consumers;
+	struct inode		*inode;		/* Also hold a ref to inode */
+	loff_t			offset;
+	u8			insn[MAX_UINSN_BYTES];	/* orig instruction */
+	u16			fixups;
+	int			copy;
+};
+
 /*
  * Most architectures can use the default versions of @read_opcode(),
  * @set_bkpt(), @set_orig_insn(), and @is_bkpt_insn();
@@ -90,4 +104,22 @@ struct uprobe_consumer {
  *	the probed instruction stream.  @tskinfo is as for @pre_xol().
  *	You must provide this function.
  */
+
+#ifdef CONFIG_UPROBES
+extern int register_uprobe(struct inode *inode, loff_t offset,
+				struct uprobe_consumer *consumer);
+extern void unregister_uprobe(struct inode *inode, loff_t offset,
+				struct uprobe_consumer *consumer);
+#else /* CONFIG_UPROBES is not defined */
+static inline int register_uprobe(struct inode *inode, loff_t offset,
+				struct uprobe_consumer *consumer)
+{
+	return -ENOSYS;
+}
+static inline void unregister_uprobe(struct inode *inode, loff_t offset,
+				struct uprobe_consumer *consumer)
+{
+}
+
+#endif /* CONFIG_UPROBES */
 #endif	/* _LINUX_UPROBES_H */

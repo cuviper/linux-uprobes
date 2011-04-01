@@ -32,17 +32,6 @@
 #include <linux/uprobes.h>
 #include <linux/rmap.h> /* needed for anon_vma_prepare */
 
-struct uprobe {
-	struct rb_node		rb_node;	/* node in the rb tree */
-	atomic_t		ref;		/* lifetime muck */
-	struct rw_semaphore	consumer_rwsem;
-	struct uprobe_consumer	*consumers;
-	struct inode		*inode;		/* we hold a ref */
-	loff_t			offset;
-	u8			insn[MAX_UINSN_BYTES];
-	u16			fixups;
-};
-
 static bool valid_vma(struct vm_area_struct *vma)
 {
 	if (!vma->vm_file)
@@ -469,4 +458,273 @@ static bool del_consumer(struct uprobe *uprobe,
 	}
 	up_write(&uprobe->consumer_rwsem);
 	return ret;
+}
+
+static int install_uprobe(struct mm_struct *mm, struct uprobe *uprobe)
+{
+	int ret = 0;
+
+	/*TODO: install breakpoint */
+	if (!ret)
+		atomic_inc(&mm->uprobes_count);
+	return ret;
+}
+
+static int remove_uprobe(struct mm_struct *mm, struct uprobe *uprobe)
+{
+	int ret = 0;
+
+	/*TODO: remove breakpoint */
+	if (!ret)
+		atomic_dec(&mm->uprobes_count);
+
+	return ret;
+}
+
+static void delete_uprobe(struct mm_struct *mm, struct uprobe *uprobe)
+{
+	down_read(&mm->mmap_sem);
+	remove_uprobe(mm, uprobe);
+	list_del(&mm->uprobes_list);
+	up_read(&mm->mmap_sem);
+	mmput(mm);
+}
+
+/*
+ * There could be threads that have hit the breakpoint and are entering
+ * the notifier code and trying to acquire the treelock. The thread
+ * calling erase_uprobe() that is removing the uprobe from the rb_tree
+ * can race with these threads and might acquire the treelock compared
+ * to some of the breakpoint hit threads. In such a case, the breakpoint
+ * hit threads will not find the uprobe. Finding if a "trap" instruction
+ * was present at the interrupting address is racy. Hence provide some
+ * extra time (by way of synchronize_sched() for breakpoint hit threads
+ * to acquire the treelock before the uprobe is removed from the rbtree.
+ */
+static void erase_uprobe(struct uprobe *uprobe)
+{
+	unsigned long flags;
+
+	synchronize_sched();
+	spin_lock_irqsave(&treelock, flags);
+	rb_erase(&uprobe->rb_node, &uprobes_tree);
+	spin_unlock_irqrestore(&treelock, flags);
+	iput(uprobe->inode);
+}
+
+static DEFINE_MUTEX(uprobes_mutex);
+
+/*
+ * register_uprobe - register a probe
+ * @inode: the file in which the probe has to be placed.
+ * @offset: offset from the start of the file.
+ * @consumer: information on howto handle the probe..
+ *
+ * Apart from the access refcount, register_uprobe() takes a creation
+ * refcount (thro uprobes_add) if and only if this @uprobe is getting
+ * inserted into the rbtree (i.e first consumer for a @inode:@offset
+ * tuple).  Creation refcount stops unregister_uprobe from freeing the
+ * @uprobe even before the register operation is complete. Creation
+ * refcount is released when the last @consumer for the @uprobe
+ * unregisters.
+ *
+ * Return errno if it cannot successully install probes
+ * else return 0 (success)
+ */
+int register_uprobe(struct inode *inode, loff_t offset,
+				struct uprobe_consumer *consumer)
+{
+	struct prio_tree_iter iter;
+	struct list_head try_list, success_list;
+	struct address_space *mapping;
+	struct mm_struct *mm, *tmpmm;
+	struct vm_area_struct *vma;
+	struct uprobe *uprobe;
+	int ret = -1;
+
+	if (!inode || !consumer || consumer->next)
+		return -EINVAL;
+
+	uprobe = uprobes_add(inode, offset);
+	if (!uprobe)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&try_list);
+	INIT_LIST_HEAD(&success_list);
+	mapping = inode->i_mapping;
+
+	mutex_lock(&uprobes_mutex);
+	if (uprobe->consumers) {
+		ret = 0;
+		goto consumers_add;
+	}
+
+	spin_lock(&mapping->i_mmap_lock);
+	vma_prio_tree_foreach(vma, &iter, &mapping->i_mmap, 0, 0) {
+		loff_t vaddr;
+
+		if (!atomic_inc_not_zero(&vma->vm_mm->mm_users))
+			continue;
+
+		mm = vma->vm_mm;
+		if (!valid_vma(vma)) {
+			mmput(mm);
+			continue;
+		}
+
+		vaddr = vma->vm_start + offset;
+		vaddr -= vma->vm_pgoff << PAGE_SHIFT;
+		if (vaddr > ULONG_MAX) {
+			/*
+			 * We cannot have a virtual address that is
+			 * greater than ULONG_MAX
+			 */
+			mmput(mm);
+			continue;
+		}
+		mm->uprobes_vaddr = (unsigned long) vaddr;
+		list_add(&mm->uprobes_list, &try_list);
+	}
+	spin_unlock(&mapping->i_mmap_lock);
+
+	if (list_empty(&try_list)) {
+		ret = 0;
+		goto consumers_add;
+	}
+	list_for_each_entry_safe(mm, tmpmm, &try_list, uprobes_list) {
+		down_read(&mm->mmap_sem);
+		ret = install_uprobe(mm, uprobe);
+
+		if (ret && (ret != -ESRCH || ret != -EEXIST)) {
+			up_read(&mm->mmap_sem);
+			break;
+		}
+		if (!ret)
+			list_move(&mm->uprobes_list, &success_list);
+		else {
+			/*
+			 * install_uprobe failed as there are no active
+			 * threads for the mm; ignore the error.
+			 */
+			list_del(&mm->uprobes_list);
+			mmput(mm);
+		}
+		up_read(&mm->mmap_sem);
+	}
+
+	if (list_empty(&try_list)) {
+		/*
+		 * All install_uprobes were successful;
+		 * cleanup successful entries.
+		 */
+		ret = 0;
+		list_for_each_entry_safe(mm, tmpmm, &success_list,
+						uprobes_list) {
+			list_del(&mm->uprobes_list);
+			mmput(mm);
+		}
+		goto consumers_add;
+	}
+
+	/*
+	 * Atleast one unsuccessful install_uprobe;
+	 * remove successful probes and cleanup untried entries.
+	 */
+	list_for_each_entry_safe(mm, tmpmm, &success_list, uprobes_list)
+		delete_uprobe(mm, uprobe);
+	list_for_each_entry_safe(mm, tmpmm, &try_list, uprobes_list) {
+		list_del(&mm->uprobes_list);
+		mmput(mm);
+	}
+	erase_uprobe(uprobe);
+	goto put_unlock;
+
+consumers_add:
+	add_consumer(uprobe, consumer);
+
+put_unlock:
+	mutex_unlock(&uprobes_mutex);
+	put_uprobe(uprobe); /* drop access ref */
+	return ret;
+}
+
+/*
+ * unregister_uprobe - unregister a already registered probe.
+ * @inode: the file in which the probe has to be removed.
+ * @offset: offset from the start of the file.
+ * @consumer: identify which probe if multiple probes are colocated.
+ */
+void unregister_uprobe(struct inode *inode, loff_t offset,
+				struct uprobe_consumer *consumer)
+{
+	struct prio_tree_iter iter;
+	struct list_head tmp_list;
+	struct address_space *mapping;
+	struct mm_struct *mm, *tmpmm;
+	struct vm_area_struct *vma;
+	struct uprobe *uprobe;
+
+	if (!inode || !consumer)
+		return;
+
+	uprobe = find_uprobe(inode, offset);
+	if (!uprobe) {
+		printk(KERN_ERR "No uprobe found with inode:offset %p %lld\n",
+				inode, offset);
+		return;
+	}
+
+	if (!del_consumer(uprobe, consumer)) {
+		printk(KERN_ERR "No uprobe found with consumer %p\n",
+				consumer);
+		return;
+	}
+
+	INIT_LIST_HEAD(&tmp_list);
+
+	mapping = inode->i_mapping;
+
+	mutex_lock(&uprobes_mutex);
+	if (uprobe->consumers)
+		goto put_unlock;
+
+	spin_lock(&mapping->i_mmap_lock);
+	vma_prio_tree_foreach(vma, &iter, &mapping->i_mmap, 0, 0) {
+		if (!atomic_inc_not_zero(&vma->vm_mm->mm_users))
+			continue;
+
+		mm = vma->vm_mm;
+
+		if (!atomic_read(&mm->uprobes_count)) {
+			mmput(mm);
+			continue;
+		}
+
+		if (valid_vma(vma)) {
+			loff_t vaddr;
+
+			vaddr = vma->vm_start + offset;
+			vaddr -= vma->vm_pgoff << PAGE_SHIFT;
+			if (vaddr > ULONG_MAX) {
+				/*
+				 * We cannot have a virtual address that is
+				 * greater than ULONG_MAX
+				 */
+				mmput(mm);
+				continue;
+			}
+			mm->uprobes_vaddr = (unsigned long) vaddr;
+			list_add(&mm->uprobes_list, &tmp_list);
+		} else
+			mmput(mm);
+	}
+	spin_unlock(&mapping->i_mmap_lock);
+	list_for_each_entry_safe(mm, tmpmm, &tmp_list, uprobes_list)
+		delete_uprobe(mm, uprobe);
+
+	erase_uprobe(uprobe);
+
+put_unlock:
+	mutex_unlock(&uprobes_mutex);
+	put_uprobe(uprobe); /* drop access ref */
 }

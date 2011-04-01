@@ -317,6 +317,11 @@ struct mm_struct {
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	pgtable_t pmd_huge_pte; /* protected by page_table_lock */
 #endif
+#ifdef CONFIG_UPROBES
+	unsigned long uprobes_vaddr;
+	struct list_head uprobes_list; /* protected by uprobes_mutex */
+	atomic_t uprobes_count;
+#endif
 };
 
 /* Future-safe accessor for struct mm_struct's cpu_vm_mask. */
