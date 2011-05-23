@@ -792,6 +792,8 @@ config NET_VENDOR_SMC
 config WD80x3
 	tristate "WD80*3 support"
 	depends on NET_VENDOR_SMC && ISA
+	# broken build
+	depends on 0
 	select CRC32
 	help
 	  If you have a network (Ethernet) card of this type, say Y and read
@@ -1244,6 +1246,8 @@ config EEXPRESS_PRO
 config HPLAN_PLUS
 	tristate "HP PCLAN+ (27247B and 27252A) support"
 	depends on NET_ISA
+	# broken build with config-Mon_Jul_21_20_21_08_CEST_2008.bad
+	depends on 0
 	select CRC32
 	help
 	  If you have a network (Ethernet) card of this type, say Y and read
@@ -2781,6 +2785,8 @@ config S2IO
 config VXGE
 	tristate "Exar X3100 Series 10GbE PCIe Server Adapter"
 	depends on PCI && INET
+	# build failures:
+	depends on 0
 	---help---
 	  This driver supports Exar Corp's X3100 Series 10 GbE PCIe
 	  I/O Virtualized Server Adapter.
@@ -2828,6 +2834,8 @@ config MYRI10GE_DCA
 
 config NETXEN_NIC
 	tristate "NetXen Multi port (1/10) Gigabit Ethernet NIC"
+	# build breakage
+	depends on 0
 	depends on PCI
 	select FW_LOADER
 	help
@@ -3416,7 +3424,8 @@ config NETCONSOLE
 
 config NETCONSOLE_DYNAMIC
 	bool "Dynamic reconfiguration of logging targets"
-	depends on NETCONSOLE && SYSFS && CONFIGFS_FS
+	depends on NETCONSOLE
+	select CONFIGFS_FS
 	help
 	  This option enables the ability to dynamically reconfigure target
 	  parameters (interface, IP addresses, port numbers, MAC addresses)
