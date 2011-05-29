@@ -538,13 +538,17 @@ struct mm_struct * mm_alloc(void)
 		return NULL;
 
 	memset(mm, 0, sizeof(*mm));
+	mm = mm_init(mm, current);
+	if (!mm)
+		return NULL;
 
 	if (mm_init_cpumask(mm, NULL)) {
+		mm_free_pgd(mm);
 		free_mm(mm);
 		return NULL;
 	}
 
-	return mm_init(mm, current);
+	return mm;
 }
 
 /*
