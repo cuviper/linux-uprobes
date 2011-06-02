@@ -10,16 +10,28 @@
 #include <rfb/rfb.h>
 #include <stdint.h>
 
+/*
+ * IRQs
+ */
 #define KBD_IRQ			1
 #define AUX_IRQ			12
 
-#define CMD_READ_MODE		0x20
-#define CMD_WRITE_MODE		0x60
-#define CMD_WRITE_AUX_BUF	0xD3
-#define CMD_WRITE_AUX		0xD4
-#define CMD_TEST_AUX		0xA9
-#define CMD_DISABLE_AUX		0xA7
-#define CMD_ENABLE_AUX		0xA8
+/*
+ * Registers
+ */
+#define I8042_DATA_REG		0x60
+#define I8042_COMMAND_REG	0x64
+
+/*
+ * Commands
+ */
+#define I8042_CMD_CTL_RCTR	0x20
+#define I8042_CMD_CTL_WCTR	0x60
+#define I8042_CMD_AUX_LOOP	0xD3
+#define I8042_CMD_AUX_SEND	0xD4
+#define I8042_CMD_AUX_TEST	0xA9
+#define I8042_CMD_AUX_DISABLE	0xA7
+#define I8042_CMD_AUX_ENABLE	0xA8
 
 #define RESPONSE_ACK		0xFA
 
@@ -30,11 +42,14 @@
 #define AUX_DEFAULT_RESOLUTION	0x2
 #define AUX_DEFAULT_SAMPLE	100
 
-#define KBD_STATUS_SYS		0x4
-#define KBD_STATUS_A2		0x8
-#define KBD_STATUS_INH		0x10
-#define KBD_STATUS_OBF		0x01
-#define KBD_STATUS_AUX_OBF	0x20
+/*
+ * Status register bits
+ */
+#define I8042_STR_AUXDATA	0x20
+#define I8042_STR_KEYLOCK	0x10
+#define I8042_STR_CMDDAT	0x08
+#define I8042_STR_MUXERR	0x04
+#define I8042_STR_OBF		0x01
 
 #define KBD_MODE_KBD_INT	0x01
 #define KBD_MODE_SYS		0x02
@@ -80,16 +95,16 @@ static void kbd_update_irq(void)
 	u8 mlevel = 0;
 
 	/* First, clear the kbd and aux output buffer full bits */
-	state.status &= ~(KBD_STATUS_OBF | KBD_STATUS_AUX_OBF);
+	state.status &= ~(I8042_STR_OBF | I8042_STR_AUXDATA);
 
 	if (state.kcount > 0) {
-		state.status |= KBD_STATUS_OBF;
+		state.status |= I8042_STR_OBF;
 		klevel = 1;
 	}
 
 	/* Keyboard has higher priority than mouse */
 	if (klevel == 0 && state.mcount != 0) {
-		state.status |= KBD_STATUS_OBF | KBD_STATUS_AUX_OBF;
+		state.status |= I8042_STR_OBF | I8042_STR_AUXDATA;
 		mlevel = 1;
 	}
 
@@ -125,28 +140,25 @@ static void kbd_queue(u8 c)
 	kbd_update_irq();
 }
 
-/*
- * This function is called when the OS issues a write to port 0x64
- */
-static void kbd_write_command(u32 val)
+static void kbd_write_command(u8 val)
 {
 	switch (val) {
-	case CMD_READ_MODE:
+	case I8042_CMD_CTL_RCTR:
 		kbd_queue(state.mode);
 		break;
-	case CMD_WRITE_MODE:
-	case CMD_WRITE_AUX:
-	case CMD_WRITE_AUX_BUF:
+	case I8042_CMD_CTL_WCTR:
+	case I8042_CMD_AUX_SEND:
+	case I8042_CMD_AUX_LOOP:
 		state.write_cmd = val;
 		break;
-	case CMD_TEST_AUX:
+	case I8042_CMD_AUX_TEST:
 		/* 0 means we're a normal PS/2 mouse */
 		mouse_queue(0);
 		break;
-	case CMD_DISABLE_AUX:
+	case I8042_CMD_AUX_DISABLE:
 		state.mode |= MODE_DISABLE_AUX;
 		break;
-	case CMD_ENABLE_AUX:
+	case I8042_CMD_AUX_ENABLE:
 		state.mode &= ~MODE_DISABLE_AUX;
 		break;
 	default:
@@ -199,15 +211,15 @@ static u32 kbd_read_status(void)
 static void kbd_write_data(u32 val)
 {
 	switch (state.write_cmd) {
-	case CMD_WRITE_MODE:
+	case I8042_CMD_CTL_WCTR:
 		state.mode = val;
 		kbd_update_irq();
 		break;
-	case CMD_WRITE_AUX_BUF:
+	case I8042_CMD_AUX_LOOP:
 		mouse_queue(val);
 		mouse_queue(RESPONSE_ACK);
 		break;
-	case CMD_WRITE_AUX:
+	case I8042_CMD_AUX_SEND:
 		/* The OS wants to send a command to the mouse */
 		mouse_queue(RESPONSE_ACK);
 		switch (val) {
@@ -269,7 +281,7 @@ static void kbd_write_data(u32 val)
 static void kbd_reset(void)
 {
 	state = (struct kbd_state) {
-		.status		= KBD_STATUS_SYS | KBD_STATUS_A2 | KBD_STATUS_INH, /* 0x1c */
+		.status		= I8042_STR_MUXERR | I8042_STR_CMDDAT | I8042_STR_KEYLOCK, /* 0x1c */
 		.mode		= KBD_MODE_KBD_INT | KBD_MODE_SYS, /* 0x3 */
 		.mres		= AUX_DEFAULT_RESOLUTION,
 		.msample	= AUX_DEFAULT_SAMPLE,
@@ -436,27 +448,40 @@ void kbd_handle_ptr(int buttonMask, int x, int y, rfbClientPtr cl)
  */
 static bool kbd_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size, u32 count)
 {
-	u32 result;
-
-	if (port == 0x64) {
-		result = kbd_read_status();
-		ioport__write8(data, (char)result);
-	} else {
-		result = kbd_read_data();
-		ioport__write32(data, result);
+	switch (port) {
+	case I8042_COMMAND_REG: {
+		u8 value = kbd_read_status();
+		ioport__write8(data, value);
+		break;
 	}
+	case I8042_DATA_REG: {
+		u32 value = kbd_read_data();
+		ioport__write32(data, value);
+		break;
+	}
+	default:
+		return false;
+	}
+
 	return true;
 }
 
-/*
- * Called when the OS attempts to read from a keyboard port (0x60 or 0x64)
- */
 static bool kbd_out(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size, u32 count)
 {
-	if (port == 0x64)
-		kbd_write_command(*((u32 *)data));
-	else
-		kbd_write_data(*((u32 *)data));
+	switch (port) {
+	case I8042_COMMAND_REG: {
+		u8 value = ioport__read8(data);
+		kbd_write_command(value);
+		break;
+	}
+	case I8042_DATA_REG: {
+		u32 value = ioport__read32(data);
+		kbd_write_data(value);
+		break;
+	}
+	default:
+		return false;
+	}
 
 	return true;
 }
@@ -470,6 +495,6 @@ void kbd__init(struct kvm *kvm)
 {
 	kbd_reset();
 	state.kvm = kvm;
-	ioport__register(0x60, &kbd_ops, 2, NULL);
-	ioport__register(0x64, &kbd_ops, 2, NULL);
+	ioport__register(I8042_DATA_REG, &kbd_ops, 2, NULL);
+	ioport__register(I8042_COMMAND_REG, &kbd_ops, 2, NULL);
 }
