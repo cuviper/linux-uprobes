@@ -30,6 +30,7 @@
 #include <kvm/virtio-9p.h>
 #include <kvm/vesa.h>
 #include <kvm/ioeventfd.h>
+#include <kvm/i8042.h>
 
 /* header files for gitish interface  */
 #include <kvm/kvm-run.h>
@@ -47,8 +48,8 @@
 #define MIN_RAM_SIZE_MB		(64ULL)
 #define MIN_RAM_SIZE_BYTE	(MIN_RAM_SIZE_MB << MB_SHIFT)
 
-static struct kvm *kvm;
-static struct kvm_cpu *kvm_cpus[KVM_NR_CPUS];
+struct kvm *kvm;
+struct kvm_cpu *kvm_cpus[KVM_NR_CPUS];
 __thread struct kvm_cpu *current_kvm_cpu;
 
 static u64 ram_size;
@@ -163,6 +164,20 @@ static void handle_sigusr1(int sig)
 	fflush(stdout);
 	printout_done = 1;
 	mb();
+}
+
+/* Pause/resume the guest using SIGUSR2 */
+static int is_paused;
+
+static void handle_sigusr2(int sig)
+{
+	if (is_paused)
+		kvm__continue();
+	else
+		kvm__pause();
+
+	is_paused = !is_paused;
+	pr_info("Guest %s\n", is_paused ? "paused" : "resumed");
 }
 
 static void handle_sigquit(int sig)
@@ -422,6 +437,7 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 	signal(SIGALRM, handle_sigalrm);
 	signal(SIGQUIT, handle_sigquit);
 	signal(SIGUSR1, handle_sigusr1);
+	signal(SIGUSR2, handle_sigusr2);
 
 	nr_online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 
@@ -611,8 +627,10 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 
 	kvm__init_ram(kvm);
 
-	if (vnc)
+	if (vnc) {
+		kbd__init(kvm);
 		vesa__init(kvm);
+	}
 
 	thread_pool__init(nr_online_cpus);
 	ioeventfd__start();
