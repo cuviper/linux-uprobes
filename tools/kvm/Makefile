@@ -17,6 +17,7 @@ TAGS = ctags
 
 OBJS	+= cpuid.o
 OBJS	+= disk/core.o
+OBJS	+= framebuffer.o
 OBJS	+= hw/rtc.o
 OBJS	+= hw/serial.o
 OBJS	+= interrupt.o
@@ -50,6 +51,7 @@ OBJS	+= util/parse-options.o
 OBJS	+= util/rbtree-interval.o
 OBJS	+= util/strbuf.o
 OBJS	+= virtio/9p.o
+OBJS	+= hw/vesa.o
 
 
 FLAGS_BFD=$(CFLAGS) -lbfd
@@ -63,10 +65,18 @@ endif
 FLAGS_VNCSERVER=$(CFLAGS) -lvncserver
 has_vncserver := $(call try-cc,$(SOURCE_VNCSERVER),$(FLAGS_VNCSERVER))
 ifeq ($(has_vncserver),y)
+	OBJS	+= ui/vnc.o
 	CFLAGS	+= -DCONFIG_HAS_VNCSERVER
-	OBJS	+= hw/vesa.o
 	OBJS    += hw/i8042.o
 	LIBS	+= -lvncserver
+endif
+
+FLAGS_SDL=$(CFLAGS) -lSDL
+has_SDL := $(call try-cc,$(SOURCE_SDL),$(FLAGS_SDL))
+ifeq ($(has_SDL),y)
+	OBJS	+= ui/sdl.o
+	CFLAGS	+= -DCONFIG_HAS_SDL
+	LIBS	+= -lSDL
 endif
 
 DEPS	:= $(patsubst %.o,%.d,$(OBJS))
