@@ -553,6 +553,11 @@ static int __copy_insn(struct address_space *mapping,
 
 	idx = (unsigned long) (offset >> PAGE_CACHE_SHIFT);
 	off1 = offset &= ~PAGE_MASK;
+
+	/*
+	 * Ensure that the page that has the original instruction is
+	 * populated and in page-cache.
+	 */
 	page_cache_sync_readahead(mapping, &filp->f_ra, filp, idx, 1);
 	page = grab_cache_page(mapping, idx);
 	if (!page)
@@ -978,8 +983,7 @@ int mmap_uprobe(struct vm_area_struct *vma)
 	struct uprobe *uprobe, *u;
 	struct mm_struct *mm;
 	struct inode *inode;
-	unsigned long start;
-	unsigned long pgoff;
+	unsigned long start, pgoff;
 	int ret = 0;
 
 	if (!valid_vma(vma))
