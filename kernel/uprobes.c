@@ -363,14 +363,14 @@ static int match_uprobe(struct uprobe *l, struct uprobe *r, int *match_inode)
 static struct uprobe *__find_uprobe(struct inode * inode,
 			 loff_t offset, struct rb_node **close_match)
 {
-	struct uprobe r = { .inode = inode, .offset = offset };
+	struct uprobe u = { .inode = inode, .offset = offset };
 	struct rb_node *n = uprobes_tree.rb_node;
 	struct uprobe *uprobe;
 	int match, match_inode;
 
 	while (n) {
 		uprobe = rb_entry(n, struct uprobe, rb_node);
-		match = match_uprobe(uprobe, &r, &match_inode);
+		match = match_uprobe(&u, uprobe, &match_inode);
 		if (close_match && match_inode)
 			*close_match = n;
 
@@ -412,7 +412,7 @@ static struct uprobe *__insert_uprobe(struct uprobe *uprobe)
 	while (*p) {
 		parent = *p;
 		u = rb_entry(parent, struct uprobe, rb_node);
-		match = match_uprobe(u, uprobe, NULL);
+		match = match_uprobe(uprobe, u, NULL);
 		if (!match) {
 			atomic_inc(&u->ref);
 			return u;
