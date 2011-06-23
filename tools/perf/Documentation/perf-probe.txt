@@ -183,4 +183,4 @@ Delete all probes on schedule().
 
 SEE ALSO
 --------
-linkperf:perf-trace[1], linkperf:perf-record[1]
+linkperf:perf-script[1], linkperf:perf-record[1]
