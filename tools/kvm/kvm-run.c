@@ -42,9 +42,9 @@
 
 #define DEFAULT_KVM_DEV		"/dev/kvm"
 #define DEFAULT_CONSOLE		"serial"
-#define DEFAULT_NETWORK		"virtio"
-#define DEFAULT_HOST_ADDR	"192.168.33.2"
-#define DEFAULT_GUEST_MAC	"00:11:22:33:44:55"
+#define DEFAULT_NETWORK		"user"
+#define DEFAULT_HOST_ADDR	"192.168.33.1"
+#define DEFAULT_GUEST_MAC	"00:15:15:15:15:15"
 #define DEFAULT_SCRIPT		"none"
 
 #define MB_SHIFT		(20)
@@ -69,7 +69,6 @@ static const char *network;
 static const char *host_ip_addr;
 static const char *guest_mac;
 static const char *script;
-static const char *virtio_9p_dir;
 static bool single_step;
 static bool readonly_image[MAX_DISK_IMAGES];
 static bool vnc;
@@ -108,6 +107,29 @@ static int img_name_parser(const struct option *opt, const char *arg, int unset)
 	return 0;
 }
 
+static int virtio_9p_rootdir_parser(const struct option *opt, const char *arg, int unset)
+{
+	char *tag_name;
+	char tmp[PATH_MAX];
+
+	/*
+	 * 9p dir can be of the form dirname,tag_name or
+	 * just dirname. In the later case we use the
+	 * default tag name
+	 */
+	tag_name = strstr(arg, ",");
+	if (tag_name) {
+		*tag_name = '\0';
+		tag_name++;
+	}
+	if (realpath(arg, tmp))
+		virtio_9p__init(kvm, tmp, tag_name);
+	else
+		die("Failed resolving 9p path");
+	return 0;
+}
+
+
 static const struct option options[] = {
 	OPT_GROUP("Basic options:"),
 	OPT_INTEGER('c', "cpus", &nrcpus, "Number of CPUs"),
@@ -118,8 +140,8 @@ static const struct option options[] = {
 	OPT_INCR('\0', "rng", &virtio_rng,
 			"Enable virtio Random Number Generator"),
 	OPT_STRING('\0', "kvm-dev", &kvm_dev, "kvm-dev", "KVM device file"),
-	OPT_STRING('\0', "virtio-9p", &virtio_9p_dir, "root dir",
-			"Enable 9p over virtio"),
+	OPT_CALLBACK('\0', "virtio-9p", NULL, "dirname,tag_name",
+		     "Enable 9p over virtio", virtio_9p_rootdir_parser),
 	OPT_BOOLEAN('\0', "vnc", &vnc, "Enable VNC framebuffer"),
 	OPT_BOOLEAN('\0', "sdl", &sdl, "Enable SDL framebuffer"),
 
@@ -132,7 +154,7 @@ static const struct option options[] = {
 			"Kernel command line arguments"),
 
 	OPT_GROUP("Networking options:"),
-	OPT_STRING('n', "network", &network, "virtio",
+	OPT_STRING('n', "network", &network, "user, tap, none",
 			"Network to use"),
 	OPT_STRING('\0', "host-ip-addr", &host_ip_addr, "a.b.c.d",
 			"Assign this address to the host side networking"),
@@ -324,8 +346,8 @@ static u64 host_ram_size(void)
 
 static u64 get_ram_size(int nr_cpus)
 {
-	long available;
-	long ram_size;
+	u64 available;
+	u64 ram_size;
 
 	ram_size	= 64 * (nr_cpus + 3);
 
@@ -520,15 +542,6 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 	if (!script)
 		script = DEFAULT_SCRIPT;
 
-	if (virtio_9p_dir) {
-		char tmp[PATH_MAX];
-
-		if (realpath(virtio_9p_dir, tmp))
-			virtio_9p__init(kvm, tmp);
-		else
-			die("Failed resolving 9p path");
-	}
-
 	symbol__init(vmlinux_filename);
 
 	term_init();
@@ -557,7 +570,7 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 		vidmode = 0;
 
 	memset(real_cmdline, 0, sizeof(real_cmdline));
-	strcpy(real_cmdline, "notsc noapic noacpi pci=conf1");
+	strcpy(real_cmdline, "notsc noapic noacpi pci=conf1 reboot=k panic=1");
 	if (vnc || sdl) {
 		strcat(real_cmdline, " video=vesafb console=tty0");
 	} else
@@ -616,20 +629,24 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 	if (!network)
 		network = DEFAULT_NETWORK;
 
-	if (!strncmp(network, "virtio", 6)) {
-		net_params = (struct virtio_net_parameters) {
-			.host_ip = host_ip_addr,
-			.kvm = kvm,
-			.script = script
-		};
-		sscanf(guest_mac,	"%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-							net_params.guest_mac,
-							net_params.guest_mac+1,
-							net_params.guest_mac+2,
-							net_params.guest_mac+3,
-							net_params.guest_mac+4,
-							net_params.guest_mac+5);
+	if (strncmp(network, "none", 4)) {
+		net_params.host_ip = host_ip_addr;
+		net_params.kvm = kvm;
+		net_params.script = script;
+		sscanf(guest_mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+			net_params.guest_mac,
+			net_params.guest_mac+1,
+			net_params.guest_mac+2,
+			net_params.guest_mac+3,
+			net_params.guest_mac+4,
+			net_params.guest_mac+5);
 
+		if (!strncmp(network, "user", 4))
+			net_params.mode = NET_MODE_USER;
+		else if (!strncmp(network, "tap", 3))
+			net_params.mode = NET_MODE_TAP;
+		else
+			die("Unkown network mode %s, please use -network user, tap, none", network);
 		virtio_net__init(&net_params);
 	}
 
@@ -648,17 +665,17 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 
 	kvm__init_ram(kvm);
 
+	kbd__init(kvm);
+
 	if (vnc || sdl)
 		fb = vesa__init(kvm);
 
 	if (vnc) {
-		kbd__init(kvm);
 		if (fb)
 			vnc__init(fb);
 	}
 
 	if (sdl) {
-		kbd__init(kvm);
 		if (fb)
 			sdl__init(fb);
 	}
