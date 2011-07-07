@@ -29,8 +29,11 @@
 #include <time.h>
 #include <sys/eventfd.h>
 #include <asm/unistd.h>
+#include <dirent.h>
 
 #define DEFINE_KVM_EXIT_REASON(reason) [reason] = #reason
+#define KVM_PID_FILE_PATH	"/.kvm-tools/"
+#define HOME_DIR		getenv("HOME")
 
 const char *kvm_exit_reasons[] = {
 	DEFINE_KVM_EXIT_REASON(KVM_EXIT_UNKNOWN),
@@ -113,11 +116,82 @@ static struct kvm *kvm__new(void)
 	return kvm;
 }
 
+static void kvm__create_pidfile(struct kvm *kvm)
+{
+	int fd;
+	char full_name[PATH_MAX], pid[10];
+
+	if (!kvm->name)
+		return;
+
+	sprintf(full_name, "%s/%s", HOME_DIR, KVM_PID_FILE_PATH);
+	mkdir(full_name, 0777);
+	sprintf(full_name, "%s/%s/%s.pid", HOME_DIR, KVM_PID_FILE_PATH, kvm->name);
+	fd = open(full_name, O_CREAT | O_WRONLY, 0666);
+	sprintf(pid, "%u\n", getpid());
+	if (write(fd, pid, strlen(pid)) <= 0)
+		die("Failed creating PID file");
+	close(fd);
+}
+
+void kvm__remove_pidfile(const char *name)
+{
+	char full_name[PATH_MAX];
+
+	sprintf(full_name, "%s/%s/%s.pid", HOME_DIR, KVM_PID_FILE_PATH, name);
+	unlink(full_name);
+}
+
+int kvm__get_pid_by_instance(const char *name)
+{
+	int fd, pid;
+	char pid_str[10], pid_file[PATH_MAX];
+
+	sprintf(pid_file, "%s/%s/%s.pid", HOME_DIR, KVM_PID_FILE_PATH, name);
+	fd = open(pid_file, O_RDONLY);
+	if (fd < 0)
+		return -1;
+
+	if (read(fd, pid_str, 10) == 0)
+		return -1;
+
+	pid = atoi(pid_str);
+	if (pid < 0)
+		return -1;
+
+	return pid;
+}
+
+int kvm__enumerate_instances(void (*callback)(const char *name, int pid))
+{
+	char full_name[PATH_MAX];
+	int pid;
+	DIR *dir;
+	struct dirent entry, *result;
+
+	sprintf(full_name, "%s/%s", HOME_DIR, KVM_PID_FILE_PATH);
+	dir = opendir(full_name);
+
+	for (;;) {
+		readdir_r(dir, &entry, &result);
+		if (result == NULL)
+			break;
+		if (entry.d_type == DT_REG) {
+			entry.d_name[strlen(entry.d_name)-4] = 0;
+			pid = kvm__get_pid_by_instance(entry.d_name);
+			callback(entry.d_name, pid);
+		}
+	}
+
+	return 0;
+}
+
 void kvm__delete(struct kvm *kvm)
 {
 	kvm__stop_timer(kvm);
 
 	munmap(kvm->ram_start, kvm->ram_size);
+	kvm__remove_pidfile(kvm->name);
 	free(kvm);
 }
 
@@ -237,7 +311,7 @@ int kvm__max_cpus(struct kvm *kvm)
 	return ret;
 }
 
-struct kvm *kvm__init(const char *kvm_dev, u64 ram_size)
+struct kvm *kvm__init(const char *kvm_dev, u64 ram_size, const char *name)
 {
 	struct kvm_pit_config pit_config = { .flags = 0, };
 	struct kvm *kvm;
@@ -296,9 +370,15 @@ struct kvm *kvm__init(const char *kvm_dev, u64 ram_size)
 	if (kvm->ram_start == MAP_FAILED)
 		die("out of memory");
 
+	madvise(kvm->ram_start, kvm->ram_size, MADV_MERGEABLE);
+
 	ret = ioctl(kvm->vm_fd, KVM_CREATE_IRQCHIP);
 	if (ret < 0)
 		die_perror("KVM_CREATE_IRQCHIP ioctl");
+
+	kvm->name = name;
+
+	kvm__create_pidfile(kvm);
 
 	return kvm;
 }

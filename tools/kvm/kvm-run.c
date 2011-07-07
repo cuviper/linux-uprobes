@@ -18,6 +18,7 @@
 #include <kvm/virtio-net.h>
 #include <kvm/virtio-console.h>
 #include <kvm/virtio-rng.h>
+#include <kvm/virtio-balloon.h>
 #include <kvm/disk-image.h>
 #include <kvm/util.h>
 #include <kvm/pci.h>
@@ -69,10 +70,12 @@ static const char *network;
 static const char *host_ip_addr;
 static const char *guest_mac;
 static const char *script;
+static const char *guest_name;
 static bool single_step;
 static bool readonly_image[MAX_DISK_IMAGES];
 static bool vnc;
 static bool sdl;
+static bool balloon;
 extern bool ioport_debug;
 extern int  active_console;
 extern int  debug_iodelay;
@@ -132,6 +135,8 @@ static int virtio_9p_rootdir_parser(const struct option *opt, const char *arg, i
 
 static const struct option options[] = {
 	OPT_GROUP("Basic options:"),
+	OPT_STRING('\0', "name", &guest_name, "guest name",
+			"A name for the guest"),
 	OPT_INTEGER('c', "cpus", &nrcpus, "Number of CPUs"),
 	OPT_U64('m', "mem", &ram_size, "Virtual machine memory size in MiB."),
 	OPT_CALLBACK('d', "disk", NULL, "image", "Disk image", img_name_parser),
@@ -142,6 +147,7 @@ static const struct option options[] = {
 	OPT_STRING('\0', "kvm-dev", &kvm_dev, "kvm-dev", "KVM device file"),
 	OPT_CALLBACK('\0', "virtio-9p", NULL, "dirname,tag_name",
 		     "Enable 9p over virtio", virtio_9p_rootdir_parser),
+	OPT_BOOLEAN('\0', "balloon", &balloon, "Enable virtio balloon"),
 	OPT_BOOLEAN('\0', "vnc", &vnc, "Enable VNC framebuffer"),
 	OPT_BOOLEAN('\0', "sdl", &sdl, "Enable SDL framebuffer"),
 
@@ -460,7 +466,7 @@ void kvm_run_help(void)
 int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 {
 	struct virtio_net_parameters net_params;
-	static char real_cmdline[2048];
+	static char real_cmdline[2048], default_name[20];
 	struct framebuffer *fb = NULL;
 	unsigned int nr_online_cpus;
 	int exit_code = 0;
@@ -546,7 +552,14 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 
 	term_init();
 
-	kvm = kvm__init(kvm_dev, ram_size);
+	if (!guest_name) {
+		sprintf(default_name, "guest-%u", getpid());
+		guest_name = default_name;
+	}
+
+	kvm = kvm__init(kvm_dev, ram_size, guest_name);
+
+	kvm->single_step = single_step;
 
 	ioeventfd__init();
 
@@ -603,7 +616,7 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 
 	free(hi);
 
-	printf("  # kvm run -k %s -m %Lu -c %d\n", kernel_filename, ram_size / 1024 / 1024, nrcpus);
+	printf("  # kvm run -k %s -m %Lu -c %d --name %s\n", kernel_filename, ram_size / 1024 / 1024, nrcpus, guest_name);
 
 	if (!kvm__load_kernel(kvm, kernel_filename, initrd_filename,
 				real_cmdline, vidmode))
@@ -625,6 +638,9 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 	if (virtio_rng)
 		while (virtio_rng--)
 			virtio_rng__init(kvm);
+
+	if (balloon)
+		virtio_bln__init(kvm);
 
 	if (!network)
 		network = DEFAULT_NETWORK;
@@ -658,9 +674,6 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 		kvm_cpus[i] = kvm_cpu__init(kvm, i);
 		if (!kvm_cpus[i])
 			die("unable to initialize KVM VCPU");
-
-		if (single_step)
-			kvm_cpu__enable_singlestep(kvm_cpus[i]);
 	}
 
 	kvm__init_ram(kvm);

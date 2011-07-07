@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <linux/types.h>
 #include <time.h>
+#include <signal.h>
 
 #define KVM_NR_CPUS		(255)
 
@@ -17,6 +18,8 @@
 
 #define SIGKVMEXIT		(SIGRTMIN + 0)
 #define SIGKVMPAUSE		(SIGRTMIN + 1)
+#define SIGKVMADDMEM		(SIGRTMIN + 2)
+#define SIGKVMDELMEM		(SIGRTMIN + 3)
 
 struct kvm {
 	int			sys_fd;		/* For system ioctls(), i.e. /dev/kvm */
@@ -32,6 +35,8 @@ struct kvm {
 
 	bool			nmi_disabled;
 
+	bool			single_step;
+
 	u16			boot_selector;
 	u16			boot_ip;
 	u16			boot_sp;
@@ -41,9 +46,11 @@ struct kvm {
 	const char		*vmlinux;
 	struct disk_image       **disks;
 	int                     nr_disks;
+
+	const char		*name;
 };
 
-struct kvm *kvm__init(const char *kvm_dev, u64 ram_size);
+struct kvm *kvm__init(const char *kvm_dev, u64 ram_size, const char *name);
 int kvm__max_cpus(struct kvm *kvm);
 void kvm__init_ram(struct kvm *kvm);
 void kvm__delete(struct kvm *kvm);
@@ -61,6 +68,9 @@ bool kvm__deregister_mmio(struct kvm *kvm, u64 phys_addr);
 void kvm__pause(void);
 void kvm__continue(void);
 void kvm__notify_paused(void);
+int kvm__get_pid_by_instance(const char *name);
+int kvm__enumerate_instances(void (*callback)(const char *name, int pid));
+void kvm__remove_pidfile(const char *name);
 
 /*
  * Debugging
