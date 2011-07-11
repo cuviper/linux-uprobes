@@ -2,6 +2,7 @@
 
 #include "kvm/disk-image.h"
 #include "kvm/read-write.h"
+#include "kvm/mutex.h"
 #include "kvm/util.h"
 
 #include <sys/types.h>
@@ -16,16 +17,16 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 
-static int insert(struct rb_root *root, struct qcow_l2_cache *new)
+static int insert(struct rb_root *root, struct qcow_l2_table *new)
 {
 	struct rb_node **link = &(root->rb_node), *parent = NULL;
 	u64 offset = new->offset;
 
 	/* search the tree */
 	while (*link) {
-		struct qcow_l2_cache *t;
+		struct qcow_l2_table *t;
 
-		t = rb_entry(*link, struct qcow_l2_cache, node);
+		t = rb_entry(*link, struct qcow_l2_table, node);
 		if (!t)
 			goto error;
 
@@ -48,14 +49,14 @@ error:
 	return -1;
 }
 
-static struct qcow_l2_cache *search(struct rb_root *root, u64 offset)
+static struct qcow_l2_table *search(struct rb_root *root, u64 offset)
 {
 	struct rb_node *link = root->rb_node;
 
 	while (link) {
-		struct qcow_l2_cache *t;
+		struct qcow_l2_table *t;
 
-		t = rb_entry(link, struct qcow_l2_cache, node);
+		t = rb_entry(link, struct qcow_l2_table, node);
 		if (!t)
 			goto out;
 
@@ -73,13 +74,13 @@ out:
 static void free_cache(struct qcow *q)
 {
 	struct list_head *pos, *n;
-	struct qcow_l2_cache *t;
+	struct qcow_l2_table *t;
 	struct rb_root *r = &q->root;
 
 	list_for_each_safe(pos, n, &q->lru_list) {
 		/* Remove cache table from the list and RB tree */
 		list_del(pos);
-		t = list_entry(pos, struct qcow_l2_cache, list);
+		t = list_entry(pos, struct qcow_l2_table, list);
 		rb_erase(&t->node, r);
 
 		/* Free the cached node */
@@ -87,17 +88,38 @@ static void free_cache(struct qcow *q)
 	}
 }
 
-static int cache_table(struct qcow *q, struct qcow_l2_cache *c)
+static int qcow_l2_cache_write(struct qcow *q, struct qcow_l2_table *c)
+{
+	struct qcow_header *header = q->header;
+	u64 size;
+
+	if (!c->dirty)
+		return 0;
+
+	size = 1 << header->l2_bits;
+
+	if (pwrite_in_full(q->fd, c->table, size * sizeof(u64), c->offset) < 0)
+		return -1;
+
+	c->dirty = 0;
+
+	return 0;
+}
+
+static int cache_table(struct qcow *q, struct qcow_l2_table *c)
 {
 	struct rb_root *r = &q->root;
-	struct qcow_l2_cache *lru;
+	struct qcow_l2_table *lru;
 
 	if (q->nr_cached == MAX_CACHE_NODES) {
 		/*
 		 * The node at the head of the list is least recently used
 		 * node. Remove it from the list and replaced with a new node.
 		 */
-		lru = list_first_entry(&q->lru_list, struct qcow_l2_cache, list);
+		lru = list_first_entry(&q->lru_list, struct qcow_l2_table, list);
+
+		if (qcow_l2_cache_write(q, lru) < 0)
+			goto error;
 
 		/* Remove the node from the cache */
 		rb_erase(&lru->node, r);
@@ -121,28 +143,25 @@ error:
 	return -1;
 }
 
-static int search_table(struct qcow *q, u64 **table, u64 offset)
+static struct qcow_l2_table *search_table(struct qcow *q, u64 offset)
 {
-	struct qcow_l2_cache *c;
+	struct qcow_l2_table *l2t;
 
-	*table = NULL;
-
-	c = search(&q->root, offset);
-	if (!c)
-		return -1;
+	l2t = search(&q->root, offset);
+	if (!l2t)
+		return NULL;
 
 	/* Update the LRU state, by moving the searched node to list tail */
-	list_move_tail(&c->list, &q->lru_list);
+	list_move_tail(&l2t->list, &q->lru_list);
 
-	*table = c->table;
-	return 0;
+	return l2t;
 }
 
 /* Allocates a new node for caching L2 table */
-static struct qcow_l2_cache *new_cache_table(struct qcow *q, u64 offset)
+static struct qcow_l2_table *new_cache_table(struct qcow *q, u64 offset)
 {
 	struct qcow_header *header = q->header;
-	struct qcow_l2_cache *c;
+	struct qcow_l2_table *c;
 	u64 l2t_sz;
 	u64 size;
 
@@ -180,107 +199,115 @@ static inline u64 get_cluster_offset(struct qcow *q, u64 offset)
 	return offset & ((1 << header->cluster_bits)-1);
 }
 
-static int qcow_read_l2_table(struct qcow *q, u64 **table, u64 offset)
+static struct qcow_l2_table *qcow_read_l2_table(struct qcow *q, u64 offset)
 {
 	struct qcow_header *header = q->header;
-	struct qcow_l2_cache *c;
+	struct qcow_l2_table *l2t;
 	u64 size;
-	u64 i;
-	u64 *t;
 
-	c      = NULL;
-	*table = NULL;
-	size   = 1 << header->l2_bits;
+	size = 1 << header->l2_bits;
 
 	/* search an entry for offset in cache */
-	if (search_table(q, table, offset) >= 0)
-		return 0;
+	l2t = search_table(q, offset);
+	if (l2t)
+		return l2t;
 
 	/* allocate new node for caching l2 table */
-	c = new_cache_table(q, offset);
-	if (!c)
+	l2t = new_cache_table(q, offset);
+	if (!l2t)
 		goto error;
-	t = c->table;
 
 	/* table not cached: read from the disk */
-	if (pread_in_full(q->fd, t, size * sizeof(u64), offset) < 0)
+	if (pread_in_full(q->fd, l2t->table, size * sizeof(u64), offset) < 0)
 		goto error;
 
 	/* cache the table */
-	if (cache_table(q, c) < 0)
+	if (cache_table(q, l2t) < 0)
 		goto error;
 
-	/* change cached table to CPU's byte-order */
-	for (i = 0; i < size; i++)
-		be64_to_cpus(&t[i]);
-
-	*table = t;
-	return 0;
+	return l2t;
 error:
-	free(c);
-	return -1;
+	free(l2t);
+	return NULL;
 }
 
 static ssize_t qcow_read_cluster(struct qcow *q, u64 offset, void *dst, u32 dst_len)
 {
 	struct qcow_header *header = q->header;
 	struct qcow_table *table  = &q->table;
+	struct qcow_l2_table *l2_table;
 	u64 l2_table_offset;
 	u64 l2_table_size;
 	u64 cluster_size;
 	u64 clust_offset;
 	u64 clust_start;
 	size_t length;
-	u64 *l2_table;
 	u64 l1_idx;
 	u64 l2_idx;
-
 
 	cluster_size = 1 << header->cluster_bits;
 
 	l1_idx = get_l1_index(q, offset);
 	if (l1_idx >= table->table_size)
-		goto out_error;
+		return -1;
 
 	clust_offset = get_cluster_offset(q, offset);
 	if (clust_offset >= cluster_size)
-		goto out_error;
+		return -1;
 
 	length = cluster_size - clust_offset;
 	if (length > dst_len)
 		length = dst_len;
 
-	l2_table_offset = table->l1_table[l1_idx] & ~header->oflag_mask;
+	mutex_lock(&q->mutex);
+
+	l2_table_offset = be64_to_cpu(table->l1_table[l1_idx]);
+	if (l2_table_offset & QCOW_OFLAG_COMPRESSED) {
+		pr_warning("compressed sectors are not supported");
+		goto out_error;
+	}
+
+	l2_table_offset &= QCOW_OFFSET_MASK;
 	if (!l2_table_offset)
 		goto zero_cluster;
 
 	l2_table_size = 1 << header->l2_bits;
 
 	/* read and cache level 2 table */
-	if (qcow_read_l2_table(q, &l2_table, l2_table_offset) < 0)
+	l2_table = qcow_read_l2_table(q, l2_table_offset);
+	if (!l2_table)
 		goto out_error;
 
 	l2_idx = get_l2_index(q, offset);
 	if (l2_idx >= l2_table_size)
 		goto out_error;
 
-	clust_start = l2_table[l2_idx] & ~header->oflag_mask;
+	clust_start = be64_to_cpu(l2_table->table[l2_idx]);
+	if (clust_start & QCOW_OFLAG_COMPRESSED) {
+		pr_warning("compressed sectors are not supported");
+		goto out_error;
+	}
+
+	clust_start &= QCOW_OFFSET_MASK;
 	if (!clust_start)
 		goto zero_cluster;
 
-	if (pread_in_full(q->fd, dst, length, clust_start + clust_offset) < 0)
-		goto out_error;
+	mutex_unlock(&q->mutex);
 
-out:
+	if (pread_in_full(q->fd, dst, length, clust_start + clust_offset) < 0)
+		return -1;
+
 	return length;
 
 zero_cluster:
+	mutex_unlock(&q->mutex);
 	memset(dst, 0, length);
-	goto out;
+	return length;
 
 out_error:
+	mutex_unlock(&q->mutex);
 	length = -1;
-	goto out;
+	return -1;
 }
 
 static ssize_t qcow_read_sector(struct disk_image *disk, u64 sector, void *dst, u32 dst_len)
@@ -347,7 +374,7 @@ static u64 qcow_write_l2_table(struct qcow *q, u64 *table)
 	clust_sz	= 1 << header->cluster_bits;
 	off		= ALIGN(f_sz, clust_sz);
 
-	if (qcow_pwrite_sync(q->fd, table, sz * sizeof(u64), off) < 0)
+	if (pwrite_in_full(q->fd, table, sz * sizeof(u64), off) < 0)
 		return 0;
 
 	return off;
@@ -367,8 +394,7 @@ static ssize_t qcow_write_cluster(struct qcow *q, u64 offset, void *buf, u32 src
 {
 	struct qcow_header *header = q->header;
 	struct qcow_table  *table  = &q->table;
-	struct qcow_l2_cache *c;
-	bool update_meta;
+	struct qcow_l2_table *l2t;
 	u64 clust_start;
 	u64 clust_off;
 	u64 clust_sz;
@@ -376,41 +402,47 @@ static ssize_t qcow_write_cluster(struct qcow *q, u64 offset, void *buf, u32 src
 	u64 l2t_idx;
 	u64 l2t_off;
 	u64 l2t_sz;
-	u64 *l2t;
 	u64 f_sz;
 	u64 len;
-	u64 t;
 
-	c               = NULL;
+	l2t		= NULL;
 	l2t_sz		= 1 << header->l2_bits;
 	clust_sz	= 1 << header->cluster_bits;
 
 	l1t_idx		= get_l1_index(q, offset);
 	if (l1t_idx >= table->table_size)
-		goto error;
+		return -1;
 
 	l2t_idx		= get_l2_index(q, offset);
 	if (l2t_idx >= l2t_sz)
-		goto error;
+		return -1;
 
 	clust_off	= get_cluster_offset(q, offset);
 	if (clust_off >= clust_sz)
-		goto error;
+		return -1;
 
 	len		= clust_sz - clust_off;
 	if (len > src_len)
 		len = src_len;
 
-	l2t_off		= table->l1_table[l1t_idx] & ~header->oflag_mask;
+	mutex_lock(&q->mutex);
+
+	l2t_off = be64_to_cpu(table->l1_table[l1t_idx]);
+	if (l2t_off & QCOW_OFLAG_COMPRESSED) {
+		pr_warning("compressed sectors are not supported");
+		goto error;
+	}
+
+	l2t_off &= QCOW_OFFSET_MASK;
 	if (l2t_off) {
 		/* read and cache l2 table */
-		if (qcow_read_l2_table(q, &l2t, l2t_off) < 0)
+		l2t = qcow_read_l2_table(q, l2t_off);
+		if (!l2t)
 			goto error;
 	} else {
-		c = new_cache_table(q, l2t_off);
-		if (!c)
+		l2t = new_cache_table(q, l2t_off);
+		if (!l2t)
 			goto error;
-		l2t = c->table;
 
 		/* Capture the state of the consistent QCOW image */
 		f_sz		= file_size(q->fd);
@@ -418,22 +450,11 @@ static ssize_t qcow_write_cluster(struct qcow *q, u64 offset, void *buf, u32 src
 			goto free_cache;
 
 		/* Write the l2 table of 0's at the end of the file */
-		l2t_off		= qcow_write_l2_table(q, l2t);
+		l2t_off		= qcow_write_l2_table(q, l2t->table);
 		if (!l2t_off)
 			goto free_cache;
 
-		/* Metadata update: update on disk level 1 table */
-		t		= cpu_to_be64(l2t_off);
-
-		if (qcow_pwrite_sync(q->fd, &t, sizeof(t), header->l1_table_offset + l1t_idx * sizeof(u64)) < 0) {
-			/* restore file to consistent state */
-			if (ftruncate(q->fd, f_sz) < 0)
-				goto free_cache;
-
-			goto free_cache;
-		}
-
-		if (cache_table(q, c) < 0) {
+		if (cache_table(q, l2t) < 0) {
 			if (ftruncate(q->fd, f_sz) < 0)
 				goto free_cache;
 
@@ -441,7 +462,7 @@ static ssize_t qcow_write_cluster(struct qcow *q, u64 offset, void *buf, u32 src
 		}
 
 		/* Update the in-core entry */
-		table->l1_table[l1t_idx] = l2t_off;
+		table->l1_table[l1t_idx] = cpu_to_be64(l2t_off);
 	}
 
 	/* Capture the state of the consistent QCOW image */
@@ -449,36 +470,31 @@ static ssize_t qcow_write_cluster(struct qcow *q, u64 offset, void *buf, u32 src
 	if (!f_sz)
 		goto error;
 
-	clust_start	= l2t[l2t_idx] & ~header->oflag_mask;
+	clust_start	= be64_to_cpu(l2t->table[l2t_idx]);
+	if (clust_start & QCOW_OFLAG_COMPRESSED) {
+		pr_warning("compressed sectors are not supported");
+		goto error;
+	}
+
+	clust_start &= QCOW_OFFSET_MASK;
 	if (!clust_start) {
-		clust_start	= ALIGN(f_sz, clust_sz);
-		update_meta	= true;
-	} else
-		update_meta	= false;
+		clust_start		= ALIGN(f_sz, clust_sz);
+		l2t->table[l2t_idx]	= cpu_to_be64(clust_start);
+		l2t->dirty		= 1;
+	}
+
+	mutex_unlock(&q->mutex);
 
 	/* Write actual data */
 	if (pwrite_in_full(q->fd, buf, len, clust_start + clust_off) < 0)
-		goto error;
-
-	if (update_meta) {
-		t = cpu_to_be64(clust_start);
-		if (qcow_pwrite_sync(q->fd, &t, sizeof(t), l2t_off + l2t_idx * sizeof(u64)) < 0) {
-			/* Restore the file to consistent state */
-			if (ftruncate(q->fd, f_sz) < 0)
-				goto error;
-
-			goto error;
-		}
-
-		/* Update the cached level2 entry */
-		l2t[l2t_idx] = clust_start;
-	}
+		return -1;
 
 	return len;
 
 free_cache:
-	free(c);
+	free(l2t);
 error:
+	mutex_unlock(&q->mutex);
 	return -1;
 }
 
@@ -518,6 +534,40 @@ static ssize_t qcow_nowrite_sector(struct disk_image *disk, u64 sector, void *sr
 	return -1;
 }
 
+static int qcow_disk_flush(struct disk_image *disk)
+{
+	struct qcow *q = disk->priv;
+	struct qcow_header *header;
+	struct list_head *pos, *n;
+	struct qcow_table *table;
+
+	header	= q->header;
+	table	= &q->table;
+
+	mutex_lock(&q->mutex);
+
+	list_for_each_safe(pos, n, &q->lru_list) {
+		struct qcow_l2_table *c = list_entry(pos, struct qcow_l2_table, list);
+
+		if (qcow_l2_cache_write(q, c) < 0)
+			goto error_unlock;
+	}
+
+	if (fdatasync(disk->fd) < 0)
+		goto error_unlock;
+
+	if (pwrite_in_full(disk->fd, table->l1_table, table->table_size * sizeof(u64), header->l1_table_offset) < 0)
+		goto error_unlock;
+
+	mutex_unlock(&q->mutex);
+
+	return fsync(disk->fd);
+
+error_unlock:
+	mutex_unlock(&q->mutex);
+	return -1;
+}
+
 static int qcow_disk_close(struct disk_image *disk)
 {
 	struct qcow *q;
@@ -544,6 +594,7 @@ static struct disk_image_operations qcow_disk_readonly_ops = {
 static struct disk_image_operations qcow_disk_ops = {
 	.read_sector		= qcow_read_sector,
 	.write_sector		= qcow_write_sector,
+	.flush			= qcow_disk_flush,
 	.close			= qcow_disk_close,
 };
 
@@ -551,7 +602,6 @@ static int qcow_read_l1_table(struct qcow *q)
 {
 	struct qcow_header *header = q->header;
 	struct qcow_table *table = &q->table;
-	u64 i;
 
 	table->table_size	= header->l1_size;
 
@@ -559,14 +609,7 @@ static int qcow_read_l1_table(struct qcow *q)
 	if (!table->l1_table)
 		return -1;
 
-	if (pread_in_full(q->fd, table->l1_table, sizeof(u64) *
-				table->table_size, header->l1_table_offset) < 0)
-		return -1;
-
-	for (i = 0; i < table->table_size; i++)
-		be64_to_cpus(&table->l1_table[i]);
-
-	return 0;
+	return pread_in_full(q->fd, table->l1_table, sizeof(u64) * table->table_size, header->l1_table_offset);
 }
 
 static void *qcow2_read_header(int fd)
@@ -603,7 +646,6 @@ static void *qcow2_read_header(int fd)
 		.l1_size		= f_header.l1_size,
 		.cluster_bits		= f_header.cluster_bits,
 		.l2_bits		= f_header.cluster_bits - 3,
-		.oflag_mask		= QCOW2_OFLAG_MASK,
 	};
 
 	return header;
@@ -619,6 +661,7 @@ static struct disk_image *qcow2_probe(int fd, bool readonly)
 	if (!q)
 		goto error;
 
+	mutex_init(&q->mutex);
 	q->fd = fd;
 	q->root = RB_ROOT;
 	INIT_LIST_HEAD(&q->lru_list);
@@ -702,7 +745,6 @@ static void *qcow1_read_header(int fd)
 		.l1_size		= f_header.size / ((1 << f_header.l2_bits) * (1 << f_header.cluster_bits)),
 		.cluster_bits		= f_header.cluster_bits,
 		.l2_bits		= f_header.l2_bits,
-		.oflag_mask		= QCOW1_OFLAG_MASK,
 	};
 
 	return header;
@@ -718,6 +760,7 @@ static struct disk_image *qcow1_probe(int fd, bool readonly)
 	if (!q)
 		goto error;
 
+	mutex_init(&q->mutex);
 	q->fd = fd;
 	q->root = RB_ROOT;
 	INIT_LIST_HEAD(&q->lru_list);

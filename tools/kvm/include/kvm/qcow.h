@@ -1,6 +1,8 @@
 #ifndef KVM__QCOW_H
 #define KVM__QCOW_H
 
+#include "kvm/mutex.h"
+
 #include <linux/types.h>
 #include <stdbool.h>
 #include <linux/rbtree.h>
@@ -11,20 +13,20 @@
 #define QCOW1_VERSION		1
 #define QCOW2_VERSION		2
 
-#define QCOW1_OFLAG_COMPRESSED	(1LL << 63)
+#define QCOW_OFLAG_COPIED	(1ULL << 63)
+#define QCOW_OFLAG_COMPRESSED	(1ULL << 62)
 
-#define QCOW1_OFLAG_MASK	QCOW1_OFLAG_COMPRESSED
+#define QCOW_OFLAGS_MASK	(QCOW_OFLAG_COPIED|QCOW_OFLAG_COMPRESSED)
 
-#define QCOW2_OFLAG_COPIED	(1LL << 63)
-#define QCOW2_OFLAG_COMPRESSED	(1LL << 62)
-#define QCOW2_OFLAG_MASK	(QCOW2_OFLAG_COPIED|QCOW2_OFLAG_COMPRESSED)
+#define QCOW_OFFSET_MASK	(~QCOW_OFLAGS_MASK)
 
 #define MAX_CACHE_NODES         32
 
-struct qcow_l2_cache {
+struct qcow_l2_table {
 	u64                     offset;
 	struct rb_node          node;
 	struct list_head        list;
+	u8			dirty;
 	u64                     table[];
 };
 
@@ -34,6 +36,7 @@ struct qcow_table {
 };
 
 struct qcow {
+	pthread_mutex_t		mutex;
 	void			*header;
 	struct qcow_table	table;
 	int			fd;
@@ -50,7 +53,6 @@ struct qcow_header {
 	u32			l1_size;
 	u8			cluster_bits;
 	u8			l2_bits;
-	u64			oflag_mask;
 };
 
 struct qcow1_header_disk {

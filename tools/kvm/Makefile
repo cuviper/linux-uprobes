@@ -20,6 +20,13 @@ TAGS	:= ctags
 
 PROGRAM	:= kvm
 
+OBJS	+= builtin-balloon.o
+OBJS	+= builtin-debug.o
+OBJS	+= builtin-help.o
+OBJS	+= builtin-list.o
+OBJS	+= builtin-pause.o
+OBJS	+= builtin-run.o
+OBJS	+= builtin-version.o
 OBJS	+= cpuid.o
 OBJS	+= disk/core.o
 OBJS	+= framebuffer.o
@@ -46,21 +53,15 @@ OBJS	+= disk/qcow.o
 OBJS	+= disk/raw.o
 OBJS	+= ioeventfd.o
 OBJS	+= irq.o
-OBJS	+= uip/core.o
-OBJS	+= uip/arp.o
-OBJS	+= uip/icmp.o
-OBJS	+= uip/ipv4.o
-OBJS	+= uip/tcp.o
-OBJS	+= uip/udp.o
-OBJS	+= uip/buf.o
-OBJS	+= uip/csum.o
+OBJS	+= net/uip/core.o
+OBJS	+= net/uip/arp.o
+OBJS	+= net/uip/icmp.o
+OBJS	+= net/uip/ipv4.o
+OBJS	+= net/uip/tcp.o
+OBJS	+= net/uip/udp.o
+OBJS	+= net/uip/buf.o
+OBJS	+= net/uip/csum.o
 OBJS	+= kvm-cmd.o
-OBJS	+= kvm-debug.o
-OBJS	+= kvm-help.o
-OBJS	+= kvm-pause.o
-OBJS	+= kvm-balloon.o
-OBJS	+= kvm-list.o
-OBJS	+= kvm-run.o
 OBJS	+= mptable.o
 OBJS	+= rbtree.o
 OBJS	+= threadpool.o
@@ -124,6 +125,7 @@ endif
 
 DEFINES	+= -D_FILE_OFFSET_BITS=64
 DEFINES	+= -D_GNU_SOURCE
+DEFINES	+= -DKVMTOOLS_VERSION='"$(KVMTOOLS_VERSION)"'
 
 KVM_INCLUDE := include
 CFLAGS	+= $(CPPFLAGS) $(DEFINES) -I$(KVM_INCLUDE) -I../../include -I../../arch/$(ARCH)/include/ -Os -g
@@ -152,6 +154,10 @@ CFLAGS	+= $(WARNINGS)
 
 all: $(PROGRAM)
 
+KVMTOOLS-VERSION-FILE:
+	@$(SHELL_PATH) util/KVMTOOLS-VERSION-GEN $(OUTPUT)
+-include $(OUTPUT)KVMTOOLS-VERSION-FILE
+
 $(PROGRAM): $(DEPS) $(OBJS)
 	$(E) "  LINK    " $@
 	$(Q) $(CC) $(OBJS) $(LIBS) -o $@
@@ -161,13 +167,14 @@ $(DEPS):
 %.d: %.c
 	$(Q) $(CC) -M -MT $(patsubst %.d,%.o,$@) $(CFLAGS) $< -o $@
 
-# The header file common-cmds.h is needed for compilation of kvm-help.c.
-kvm-help.d: $(KVM_INCLUDE)/common-cmds.h
+# The header file common-cmds.h is needed for compilation of builtin-help.c.
+builtin-help.d: $(KVM_INCLUDE)/common-cmds.h
 
 $(OBJS):
 
 rbtree.o: ../../lib/rbtree.c
 	$(Q) $(CC) -c $(CFLAGS) $< -o $@
+
 %.o: %.c
 	$(E) "  CC      " $@
 	$(Q) $(CC) -c $(CFLAGS) $< -o $@

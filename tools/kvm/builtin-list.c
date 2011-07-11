@@ -1,6 +1,6 @@
 #include <kvm/util.h>
 #include <kvm/kvm-cmd.h>
-#include <kvm/kvm-list.h>
+#include <kvm/builtin-list.h>
 #include <kvm/kvm.h>
 
 #include <stdio.h>
@@ -26,6 +26,8 @@ static void print_guest(const char *name, int pid)
 		goto cleanup;
 
 	printf("%s (PID: %d)\n", name, pid);
+
+	close(fd);
 
 	return;
 

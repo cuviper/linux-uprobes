@@ -159,6 +159,8 @@ int kvm__get_pid_by_instance(const char *name)
 	if (pid < 0)
 		return -1;
 
+	close(fd);
+
 	return pid;
 }
 
@@ -172,7 +174,7 @@ int kvm__enumerate_instances(void (*callback)(const char *name, int pid))
 	sprintf(full_name, "%s/%s", HOME_DIR, KVM_PID_FILE_PATH);
 	dir = opendir(full_name);
 
-	for (;;) {
+	while (dir != NULL) {
 		readdir_r(dir, &entry, &result);
 		if (result == NULL)
 			break;
@@ -182,6 +184,8 @@ int kvm__enumerate_instances(void (*callback)(const char *name, int pid))
 			callback(entry.d_name, pid);
 		}
 	}
+
+	closedir(dir);
 
 	return 0;
 }
