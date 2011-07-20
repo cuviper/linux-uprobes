@@ -61,6 +61,7 @@ OBJS	+= net/uip/tcp.o
 OBJS	+= net/uip/udp.o
 OBJS	+= net/uip/buf.o
 OBJS	+= net/uip/csum.o
+OBJS	+= net/uip/dhcp.o
 OBJS	+= kvm-cmd.o
 OBJS	+= mptable.o
 OBJS	+= rbtree.o
@@ -149,6 +150,7 @@ WARNINGS += -Wstrict-prototypes
 WARNINGS += -Wundef
 WARNINGS += -Wvolatile-register-var
 WARNINGS += -Wwrite-strings
+WARNINGS += -Wunused-result
 
 CFLAGS	+= $(WARNINGS)
 

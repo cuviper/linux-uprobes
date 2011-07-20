@@ -29,6 +29,40 @@
 #define UIP_TCP_FLAG_ACK	16
 #define UIP_TCP_FLAG_URG	32
 
+#define UIP_BOOTP_VENDOR_SPECIFIC_LEN	64
+#define UIP_BOOTP_MAX_PAYLOAD_LEN	300
+#define UIP_DHCP_VENDOR_SPECIFIC_LEN	312
+#define UIP_DHCP_PORT_SERVER		67
+#define UIP_DHCP_PORT_CLIENT		68
+#define UIP_DHCP_MACPAD_LEN		10
+#define UIP_DHCP_HOSTNAME_LEN		64
+#define UIP_DHCP_FILENAME_LEN		128
+#define UIP_DHCP_MAGIC_COOKIE		0x63825363
+#define UIP_DHCP_MAGIC_COOKIE_LEN	4
+#define UIP_DHCP_LEASE_TIME		0x00003840
+#define UIP_DHCP_MAX_PAYLOAD_LEN	(UIP_BOOTP_MAX_PAYLOAD_LEN - UIP_BOOTP_VENDOR_SPECIFIC_LEN +  UIP_DHCP_VENDOR_SPECIFIC_LEN)
+#define UIP_DHCP_OPTION_LEN		(UIP_DHCP_VENDOR_SPECIFIC_LEN - UIP_DHCP_MAGIC_COOKIE_LEN)
+#define UIP_DHCP_DISCOVER		1
+#define UIP_DHCP_OFFER			2
+#define UIP_DHCP_REQUEST		3
+#define UIP_DHCP_ACK			5
+#define UIP_DHCP_MAX_DNS_SERVER_NR	3
+#define UIP_DHCP_MAX_DOMAIN_NAME_LEN	256
+#define UIP_DHCP_TAG_MSG_TYPE		53
+#define UIP_DHCP_TAG_MSG_TYPE_LEN	1
+#define UIP_DHCP_TAG_SERVER_ID		54
+#define UIP_DHCP_TAG_SERVER_ID_LEN	4
+#define UIP_DHCP_TAG_LEASE_TIME		51
+#define UIP_DHCP_TAG_LEASE_TIME_LEN	4
+#define UIP_DHCP_TAG_SUBMASK		1
+#define UIP_DHCP_TAG_SUBMASK_LEN	4
+#define UIP_DHCP_TAG_ROUTER		3
+#define UIP_DHCP_TAG_ROUTER_LEN		4
+#define UIP_DHCP_TAG_DNS_SERVER		6
+#define UIP_DHCP_TAG_DNS_SERVER_LEN	4
+#define UIP_DHCP_TAG_DOMAIN_NAME	15
+#define UIP_DHCP_TAG_END		255
+
 /*
  * IP package maxium len == 64 KBytes
  * IP header == 20 Bytes
@@ -126,6 +160,27 @@ struct uip_pseudo_hdr {
 	u16 len;
 } __attribute__((packed));
 
+struct uip_dhcp {
+	struct uip_udp udp;
+	u8 msg_type;
+	u8 hardware_type;
+	u8 hardware_len;
+	u8 hops;
+	u32 id;
+	u16 time;
+	u16 flg;
+	u32 client_ip;
+	u32 your_ip;
+	u32 server_ip;
+	u32 agent_ip;
+	struct uip_eth_addr client_mac;
+	u8 pad[UIP_DHCP_MACPAD_LEN];
+	u8 server_hostname[UIP_DHCP_HOSTNAME_LEN];
+	u8 boot_filename[UIP_DHCP_FILENAME_LEN];
+	u32 magic_cookie;
+	u8 option[UIP_DHCP_OPTION_LEN];
+} __attribute__((packed));
+
 struct uip_info {
 	struct list_head udp_socket_head;
 	struct list_head tcp_socket_head;
@@ -141,7 +196,11 @@ struct uip_info {
 	int udp_epollfd;
 	int buf_free_nr;
 	int buf_used_nr;
+	u32 guest_ip;
+	u32 guest_netmask;
 	u32 host_ip;
+	u32 dns_ip[UIP_DHCP_MAX_DNS_SERVER_NR];
+	char *domain_name;
 	u32 buf_nr;
 };
 
@@ -272,6 +331,7 @@ int uip_tx(struct iovec *iov, u16 out, struct uip_info *info);
 int uip_rx(struct iovec *iov, u16 in, struct uip_info *info);
 int uip_init(struct uip_info *info);
 
+int uip_tx_do_ipv4_udp_dhcp(struct uip_tx_arg *arg);
 int uip_tx_do_ipv4_icmp(struct uip_tx_arg *arg);
 int uip_tx_do_ipv4_tcp(struct uip_tx_arg *arg);
 int uip_tx_do_ipv4_udp(struct uip_tx_arg *arg);
@@ -289,4 +349,8 @@ struct uip_buf *uip_buf_get_used(struct uip_info *info);
 struct uip_buf *uip_buf_get_free(struct uip_info *info);
 struct uip_buf *uip_buf_clone(struct uip_tx_arg *arg);
 
+int uip_udp_make_pkg(struct uip_info *info, struct uip_udp_socket *sk, struct uip_buf *buf, u8 *payload, int payload_len);
+bool uip_udp_is_dhcp(struct uip_udp *udp);
+
+int uip_dhcp_get_dns(struct uip_info *info);
 #endif /* KVM__UIP_H */
