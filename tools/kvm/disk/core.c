@@ -46,9 +46,11 @@ struct disk_image *disk_image__open(const char *filename, bool readonly)
 		return NULL;
 
 	/* qcow image ?*/
-	disk		= qcow_probe(fd, readonly);
-	if (disk)
+	disk		= qcow_probe(fd, true);
+	if (disk) {
+		pr_warning("Forcing read-only support for QCOW");
 		return disk;
+	}
 
 	/* raw image ?*/
 	disk		= raw_image__probe(fd, &st, readonly);
@@ -215,6 +217,6 @@ ssize_t disk_image__get_serial(struct disk_image *disk, void *buffer, ssize_t *l
 	if (fstat(disk->fd, &st) != 0)
 		return 0;
 
-	*len = snprintf(buffer, *len, "%lu%lu%lu", st.st_dev, st.st_rdev, st.st_ino);
+	*len = snprintf(buffer, *len, "%llu%llu%llu", (u64)st.st_dev, (u64)st.st_rdev, (u64)st.st_ino);
 	return *len;
 }
