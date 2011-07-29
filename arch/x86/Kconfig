@@ -529,6 +529,18 @@ menuconfig PARAVIRT_GUEST
 
 if PARAVIRT_GUEST
 
+config PARAVIRT_TIME_ACCOUNTING
+	bool "Paravirtual steal time accounting"
+	select PARAVIRT
+	default n
+	---help---
+	  Select this option to enable fine granularity task steal time
+	  accounting. Time spent executing other tasks in parallel with
+	  the current vCPU is discounted from the vCPU power. To account for
+	  that, there can be a small performance impact.
+
+	  If in doubt, say N here.
+
 source "arch/x86/xen/Kconfig"
 
 config KVM_CLOCK
@@ -1725,8 +1737,8 @@ menuconfig APM
 	  machines with more than one CPU.
 
 	  In order to use APM, you will need supporting software. For location
-	  and more information, read <file:Documentation/power/pm.txt> and the
-	  Battery Powered Linux mini-HOWTO, available from
+	  and more information, read <file:Documentation/power/apm-acpi.txt>
+	  and the Battery Powered Linux mini-HOWTO, available from
 	  <http://www.tldp.org/docs.html#howto>.
 
 	  This driver does not spin down disk drives (see the hdparm(8)
