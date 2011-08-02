@@ -56,16 +56,12 @@ static struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry, stru
 
 	lock_ufs(dir->i_sb);
 	ino = ufs_inode_by_name(dir, &dentry->d_name);
-	if (ino) {
+	if (ino)
 		inode = ufs_iget(dir->i_sb, ino);
-		if (IS_ERR(inode)) {
-			unlock_ufs(dir->i_sb);
-			return ERR_CAST(inode);
-		}
-	}
 	unlock_ufs(dir->i_sb);
-	d_add(dentry, inode);
-	return NULL;
+	if (IS_ERR(inode))
+		return ERR_CAST(inode);
+	return d_splice_alias(inode, dentry);
 }
 
 /*
@@ -258,8 +254,6 @@ static int ufs_rmdir (struct inode * dir, struct dentry *dentry)
 	struct inode * inode = dentry->d_inode;
 	int err= -ENOTEMPTY;
 
-	dentry_unhash(dentry);
-
 	lock_ufs(dir->i_sb);
 	if (ufs_empty_dir (inode)) {
 		err = ufs_unlink(dir, dentry);
@@ -283,9 +277,6 @@ static int ufs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct page *old_page;
 	struct ufs_dir_entry *old_de;
 	int err = -ENOENT;
-
-	if (new_inode && S_ISDIR(new_inode->i_mode))
-		dentry_unhash(new_dentry);
 
 	old_de = ufs_find_entry(old_dir, &old_dentry->d_name, &old_page);
 	if (!old_de)
