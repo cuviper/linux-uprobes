@@ -3367,6 +3367,12 @@ F:	drivers/net/ixgb/
 F:	drivers/net/ixgbe/
 F:	drivers/net/ixgbevf/
 
+INTEL MRST PMU DRIVER
+M:	Len Brown <len.brown@intel.com>
+L:	linux-pm@lists.linux-foundation.org
+S:	Supported
+F:	arch/x86/platform/mrst/pmu.*
+
 INTEL PRO/WIRELESS 2100 NETWORK CONNECTION SUPPORT
 L:	linux-wireless@vger.kernel.org
 S:	Orphan
@@ -6319,6 +6325,7 @@ F:	include/linux/sysv_fs.h
 TARGET SUBSYSTEM
 M:	Nicholas A. Bellinger <nab@linux-iscsi.org>
 L:	linux-scsi@vger.kernel.org
+L:	target-devel@vger.kernel.org
 L:	http://groups.google.com/group/linux-iscsi-target-dev
 W:	http://www.linux-iscsi.org
 T:	git git://git.kernel.org/pub/scm/linux/kernel/git/nab/lio-core-2.6.git master
