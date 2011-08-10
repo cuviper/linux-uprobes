@@ -35,6 +35,7 @@
 #include <kvm/vnc.h>
 #include <kvm/sdl.h>
 #include <kvm/framebuffer.h>
+#include <kvm/irq.h>
 
 /* header files for gitish interface  */
 #include <kvm/builtin-run.h>
@@ -67,7 +68,7 @@ static const char *vmlinux_filename;
 static const char *initrd_filename;
 static const char *image_filename[MAX_DISK_IMAGES];
 static const char *console;
-static const char *kvm_dev;
+static const char *dev;
 static const char *network;
 static const char *host_ip;
 static const char *guest_ip;
@@ -80,6 +81,7 @@ static bool readonly_image[MAX_DISK_IMAGES];
 static bool vnc;
 static bool sdl;
 static bool balloon;
+static bool using_rootfs;
 extern bool ioport_debug;
 extern int  active_console;
 extern int  debug_iodelay;
@@ -97,6 +99,18 @@ static const char * const run_usage[] = {
 static int img_name_parser(const struct option *opt, const char *arg, int unset)
 {
 	char *sep;
+	struct stat st;
+
+	if (stat(arg, &st) == 0 &&
+	    S_ISDIR(st.st_mode)) {
+		char tmp[PATH_MAX];
+
+		if (realpath(arg, tmp) == 0 ||
+		    virtio_9p__init(kvm, tmp, "/dev/root") < 0)
+			die("Unable to initialize virtio 9p");
+		using_rootfs = 1;
+		return 0;
+	}
 
 	if (image_count >= MAX_DISK_IMAGES)
 		die("Currently only 4 images are supported");
@@ -129,9 +143,10 @@ static int virtio_9p_rootdir_parser(const struct option *opt, const char *arg, i
 		*tag_name = '\0';
 		tag_name++;
 	}
-	if (realpath(arg, tmp))
-		virtio_9p__init(kvm, tmp, tag_name);
-	else
+	if (realpath(arg, tmp)) {
+		if (virtio_9p__init(kvm, tmp, tag_name) < 0)
+			die("Unable to initialize virtio 9p");
+	} else
 		die("Failed resolving 9p path");
 	return 0;
 }
@@ -143,17 +158,16 @@ static const struct option options[] = {
 			"A name for the guest"),
 	OPT_INTEGER('c', "cpus", &nrcpus, "Number of CPUs"),
 	OPT_U64('m', "mem", &ram_size, "Virtual machine memory size in MiB."),
-	OPT_CALLBACK('d', "disk", NULL, "image", "Disk image", img_name_parser),
-	OPT_STRING('\0', "console", &console, "serial or virtio",
-			"Console to use"),
-	OPT_INCR('\0', "rng", &virtio_rng,
-			"Enable virtio Random Number Generator"),
-	OPT_STRING('\0', "kvm-dev", &kvm_dev, "kvm-dev", "KVM device file"),
-	OPT_CALLBACK('\0', "virtio-9p", NULL, "dirname,tag_name",
-		     "Enable 9p over virtio", virtio_9p_rootdir_parser),
+	OPT_CALLBACK('d', "disk", NULL, "image or rootfs_dir", "Disk image or rootfs directory", img_name_parser),
 	OPT_BOOLEAN('\0', "balloon", &balloon, "Enable virtio balloon"),
 	OPT_BOOLEAN('\0', "vnc", &vnc, "Enable VNC framebuffer"),
 	OPT_BOOLEAN('\0', "sdl", &sdl, "Enable SDL framebuffer"),
+	OPT_INCR('\0', "rng", &virtio_rng, "Enable virtio Random Number Generator"),
+	OPT_CALLBACK('\0', "9p", NULL, "dir_to_share,tag_name",
+		     "Enable virtio 9p to share files between host and guest", virtio_9p_rootdir_parser),
+	OPT_STRING('\0', "console", &console, "serial or virtio",
+			"Console to use"),
+	OPT_STRING('\0', "dev", &dev, "device_file", "KVM device file"),
 
 	OPT_GROUP("Kernel options:"),
 	OPT_STRING('k', "kernel", &kernel_filename, "kernel",
@@ -220,10 +234,12 @@ static int is_paused;
 
 static void handle_sigusr2(int sig)
 {
-	if (is_paused)
+	if (sig == SIGKVMRESUME && is_paused)
 		kvm__continue();
-	else
+	else if (sig == SIGUSR2 && !is_paused)
 		kvm__pause();
+	else
+		return;
 
 	is_paused = !is_paused;
 	pr_info("Guest %s\n", is_paused ? "paused" : "resumed");
@@ -257,6 +273,11 @@ static void handle_sigalrm(int sig)
 {
 	serial8250__inject_interrupt(kvm);
 	virtio_console__inject_interrupt(kvm);
+}
+
+static void handle_sigstop(int sig)
+{
+	kvm_cpu__reboot();
 }
 
 static void *kvm_cpu_thread(void *arg)
@@ -487,6 +508,8 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 	signal(SIGQUIT, handle_sigquit);
 	signal(SIGUSR1, handle_sigusr1);
 	signal(SIGUSR2, handle_sigusr2);
+	signal(SIGKVMSTOP, handle_sigstop);
+	signal(SIGKVMRESUME, handle_sigusr2);
 
 	nr_online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 
@@ -536,8 +559,8 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 
 	ram_size <<= MB_SHIFT;
 
-	if (!kvm_dev)
-		kvm_dev = DEFAULT_KVM_DEV;
+	if (!dev)
+		dev = DEFAULT_KVM_DEV;
 
 	if (!console)
 		console = DEFAULT_CONSOLE;
@@ -571,7 +594,9 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 		guest_name = default_name;
 	}
 
-	kvm = kvm__init(kvm_dev, ram_size, guest_name);
+	kvm = kvm__init(dev, ram_size, guest_name);
+
+	irq__init(kvm);
 
 	kvm->single_step = single_step;
 
@@ -611,7 +636,7 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 		strlcat(real_cmdline, kernel_cmdline, sizeof(real_cmdline));
 
 	hi = NULL;
-	if (!image_filename[0]) {
+	if (!using_rootfs && !image_filename[0]) {
 		hi = host_image(real_cmdline, sizeof(real_cmdline));
 		if (hi) {
 			image_filename[0] = hi;
@@ -622,6 +647,9 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 
 	if (!strstr(real_cmdline, "root="))
 		strlcat(real_cmdline, " root=/dev/vda rw ", sizeof(real_cmdline));
+
+	if (using_rootfs)
+		strcat(real_cmdline, " root=/dev/root rootflags=rw,trans=virtio,version=9p2000.u rootfstype=9p");
 
 	if (image_count) {
 		kvm->nr_disks = image_count;

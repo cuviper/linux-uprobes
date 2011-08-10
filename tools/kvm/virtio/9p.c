@@ -162,7 +162,7 @@ static void virtio_p9_error_reply(struct p9_dev *p9dev,
 
 	err_str = strerror(err);
 	pdu->write_offset = VIRTIO_P9_HDR_LEN;
-	virtio_p9_pdu_writef(pdu, "s", err_str);
+	virtio_p9_pdu_writef(pdu, "sd", err_str, err);
 	*outlen = pdu->write_offset;
 
 	pdu->read_offset = sizeof(u32) + sizeof(u8);
@@ -204,7 +204,6 @@ static void virtio_p9_open(struct p9_dev *p9dev,
 	struct p9_qid qid;
 	struct p9_fid *new_fid;
 
-
 	virtio_p9_pdu_readf(pdu, "db", &fid, &mode);
 	new_fid = &p9dev->fids[fid];
 
@@ -242,13 +241,14 @@ static void virtio_p9_create(struct p9_dev *p9dev,
 	u8 mode;
 	u32 perm;
 	char *name;
+	char *ext = NULL;
 	u32 fid_val;
 	struct stat st;
 	struct p9_qid qid;
 	struct p9_fid *fid;
 	char full_path[PATH_MAX];
 
-	virtio_p9_pdu_readf(pdu, "dsdb", &fid_val, &name, &perm, &mode);
+	virtio_p9_pdu_readf(pdu, "dsdbs", &fid_val, &name, &perm, &mode, &ext);
 	fid = &p9dev->fids[fid_val];
 
 	sprintf(full_path, "%s/%s", fid->abs_path, name);
@@ -262,6 +262,14 @@ static void virtio_p9_create(struct p9_dev *p9dev,
 		close_fid(p9dev, fid_val);
 		fid->dir = dir;
 		fid->is_dir = 1;
+	} else if (perm & P9_DMSYMLINK) {
+		if (symlink(ext, full_path) < 0)
+			goto err_out;
+	} else if (perm & P9_DMLINK) {
+		int ext_fid = atoi(ext);
+
+		if (link(p9dev->fids[ext_fid].abs_path, full_path) < 0)
+			goto err_out;
 	} else {
 		fd = open(full_path, omode2uflags(mode) | O_CREAT, 0777);
 		if (fd < 0)
@@ -277,9 +285,14 @@ static void virtio_p9_create(struct p9_dev *p9dev,
 	virtio_p9_pdu_writef(pdu, "Qd", &qid, 0);
 	*outlen = pdu->write_offset;
 	virtio_p9_set_reply_header(pdu, *outlen);
+
+	free(name);
+	free(ext);
 	return;
 err_out:
 	virtio_p9_error_reply(p9dev, pdu, errno, outlen);
+	free(name);
+	free(ext);
 	return;
 }
 
@@ -294,7 +307,7 @@ static void virtio_p9_walk(struct p9_dev *p9dev,
 	u32 newfid_val;
 	struct p9_qid wqid;
 	struct p9_fid *new_fid;
-
+	int ret;
 
 	virtio_p9_pdu_readf(pdu, "ddw", &fid_val, &newfid_val, &nwname);
 	new_fid	= &p9dev->fids[newfid_val];
@@ -315,7 +328,9 @@ static void virtio_p9_walk(struct p9_dev *p9dev,
 			/* Format the new path we're 'walk'ing into */
 			sprintf(tmp, "%s/%.*s",
 				fid->path, (int)strlen(str), str);
-			if (lstat(rel_to_abs(p9dev, tmp, full_path), &st) < 0)
+
+			ret = lstat(rel_to_abs(p9dev, tmp, full_path), &st);
+			if (ret < 0)
 				goto err_out;
 
 			st2qid(&st, &wqid);
@@ -375,10 +390,20 @@ static void virtio_p9_attach(struct p9_dev *p9dev,
 	virtio_p9_pdu_writef(pdu, "Q", &qid);
 	*outlen = pdu->write_offset;
 	virtio_p9_set_reply_header(pdu, *outlen);
+	free(uname);
+	free(aname);
 	return;
 err_out:
+	free(uname);
+	free(aname);
 	virtio_p9_error_reply(p9dev, pdu, errno, outlen);
 	return;
+}
+
+static void virtio_p9_free_stat(struct p9_wstat *wstat)
+{
+	free(wstat->extension);
+	free(wstat->name);
 }
 
 static void virtio_p9_fill_stat(struct p9_dev *p9dev, const char *name,
@@ -393,6 +418,17 @@ static void virtio_p9_fill_stat(struct p9_dev *p9dev, const char *name,
 		wstat->length = 0;
 		wstat->mode |= P9_DMDIR;
 	}
+	if (S_ISLNK(st->st_mode)) {
+		char tmp[PATH_MAX] = {0}, full_path[PATH_MAX] = {0};
+
+		rel_to_abs(p9dev, name, full_path);
+
+		if (readlink(full_path, tmp, PATH_MAX) > 0)
+			wstat->extension = strdup(tmp);
+		wstat->mode |= P9_DMSYMLINK;
+	} else {
+		wstat->extension = NULL;
+	}
 
 	wstat->atime = st->st_atime;
 	wstat->mtime = st->st_mtime;
@@ -401,14 +437,20 @@ static void virtio_p9_fill_stat(struct p9_dev *p9dev, const char *name,
 	wstat->uid = NULL;
 	wstat->gid = NULL;
 	wstat->muid = NULL;
+	wstat->n_uid = wstat->n_gid = wstat->n_muid = 0;
 
-	/* NOTE: size shouldn't include its own length */
-	/* size[2] type[2] dev[4] qid[13] */
-	/* mode[4] atime[4] mtime[4] length[8]*/
-	/* name[s] uid[s] gid[s] muid[s] */
-	wstat->size = 2+4+13+4+4+4+8+2+2+2+2;
+	/*
+	 * NOTE: size shouldn't include its own length
+	 * size[2] type[2] dev[4] qid[13]
+	 * mode[4] atime[4] mtime[4] length[8]
+	 * name[s] uid[s] gid[s] muid[s]
+	 * ext[s] uid[4] gid[4] muid[4]
+	 */
+	wstat->size = 2+4+13+4+4+4+8+2+2+2+2+2+4+4+4;
 	if (wstat->name)
 		wstat->size += strlen(wstat->name);
+	if (wstat->extension)
+		wstat->size += strlen(wstat->extension);
 }
 
 static void virtio_p9_read(struct p9_dev *p9dev,
@@ -440,6 +482,7 @@ static void virtio_p9_read(struct p9_dev *p9dev,
 			read = pdu->write_offset;
 			virtio_p9_pdu_writef(pdu, "S", &wstat);
 			rcount += pdu->write_offset - read;
+			virtio_p9_free_stat(&wstat);
 
 			cur = readdir(fid->dir);
 		}
@@ -486,6 +529,7 @@ static void virtio_p9_stat(struct p9_dev *p9dev,
 
 	virtio_p9_pdu_writef(pdu, "wS", 0, &wstat);
 	*outlen = pdu->write_offset;
+	virtio_p9_free_stat(&wstat);
 	virtio_p9_set_reply_header(pdu, *outlen);
 	return;
 err_out:
@@ -665,12 +709,11 @@ static bool virtio_p9_do_io_request(struct kvm *kvm, struct p9_dev_job *job)
 	cmd = virtio_p9_get_cmd(p9pdu);
 
 	if (cmd >= ARRAY_SIZE(virtio_9p_handler) ||
-	    !virtio_9p_handler[cmd]) {
+	    !virtio_9p_handler[cmd])
 		handler = virtio_p9_eopnotsupp;
-	} else {
+	else
 		handler = virtio_9p_handler[cmd];
-		handler(p9dev, p9pdu, &len);
-	}
+	handler(p9dev, p9pdu, &len);
 	virt_queue__set_used_elem(vq, p9pdu->queue_head, len);
 	free(p9pdu);
 	return true;
@@ -773,21 +816,26 @@ static struct ioport_operations virtio_p9_io_ops = {
 	.io_out				= virtio_p9_pci_io_out,
 };
 
-void virtio_9p__init(struct kvm *kvm, const char *root, const char *tag_name)
+int virtio_9p__init(struct kvm *kvm, const char *root, const char *tag_name)
 {
-	u8 pin, line, dev;
-	u32 i, root_len;
-	u16 p9_base_addr;
 	struct p9_dev *p9dev;
+	u8 pin, line, dev;
+	u16 p9_base_addr;
+	u32 i, root_len;
+	int err = 0;
 
 	p9dev = calloc(1, sizeof(*p9dev));
 	if (!p9dev)
-		return;
+		return -ENOMEM;
+
 	if (!tag_name)
 		tag_name = VIRTIO_P9_DEFAULT_TAG;
+
 	p9dev->config = calloc(1, sizeof(*p9dev->config) + strlen(tag_name) + 1);
-	if (p9dev->config == NULL)
+	if (p9dev->config == NULL) {
+		err = -ENOMEM;
 		goto free_p9dev;
+	}
 
 	strcpy(p9dev->root_dir, root);
 	root_len = strlen(root);
@@ -800,19 +848,22 @@ void virtio_9p__init(struct kvm *kvm, const char *root, const char *tag_name)
 		p9dev->fids[i].path = p9dev->fids[i].abs_path + root_len;
 	}
 	p9dev->config->tag_len = strlen(tag_name);
-	if (p9dev->config->tag_len > MAX_TAG_LEN)
+	if (p9dev->config->tag_len > MAX_TAG_LEN) {
+		err = -EINVAL;
 		goto free_p9dev_config;
+	}
 
 	memcpy(p9dev->config->tag, tag_name, strlen(tag_name));
 	p9dev->features |= 1 << VIRTIO_9P_MOUNT_TAG;
 
-	if (irq__register_device(VIRTIO_ID_9P, &dev, &pin, &line) < 0)
+	err = irq__register_device(VIRTIO_ID_9P, &dev, &pin, &line);
+	if (err < 0)
 		goto free_p9dev_config;
 
-	p9_base_addr			= ioport__register(IOPORT_EMPTY,
-							   &virtio_p9_io_ops,
-							   IOPORT_SIZE, p9dev);
-	p9dev->base_addr		    = p9_base_addr;
+	p9_base_addr = ioport__register(IOPORT_EMPTY, &virtio_p9_io_ops, IOPORT_SIZE, p9dev);
+
+	p9dev->base_addr = p9_base_addr;
+
 	p9dev->pci_hdr = (struct pci_device_header) {
 		.vendor_id		= PCI_VENDOR_ID_REDHAT_QUMRANET,
 		.device_id		= PCI_DEVICE_ID_VIRTIO_P9,
@@ -827,9 +878,11 @@ void virtio_9p__init(struct kvm *kvm, const char *root, const char *tag_name)
 	};
 	pci__register(&p9dev->pci_hdr, dev);
 
-	return;
+	return err;
+
 free_p9dev_config:
 	free(p9dev->config);
 free_p9dev:
 	free(p9dev);
+	return err;
 }

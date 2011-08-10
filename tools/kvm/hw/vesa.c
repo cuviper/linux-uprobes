@@ -39,6 +39,7 @@ static struct pci_device_header vesa_pci_device = {
 	.subsys_vendor_id	= PCI_SUBSYSTEM_VENDOR_ID_REDHAT_QUMRANET,
 	.subsys_id		= PCI_SUBSYSTEM_ID_VESA,
 	.bar[1]			= VESA_MEM_ADDR | PCI_BASE_ADDRESS_SPACE_MEMORY,
+	.bar_size[1]		= VESA_MEM_SIZE,
 };
 
 static struct framebuffer vesafb;

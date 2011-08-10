@@ -25,7 +25,9 @@ OBJS	+= builtin-debug.o
 OBJS	+= builtin-help.o
 OBJS	+= builtin-list.o
 OBJS	+= builtin-pause.o
+OBJS	+= builtin-resume.o
 OBJS	+= builtin-run.o
+OBJS	+= builtin-stop.o
 OBJS	+= builtin-version.o
 OBJS	+= cpuid.o
 OBJS	+= disk/core.o
@@ -236,6 +238,7 @@ clean:
 	$(Q) rm -f $(DEPS) $(OBJS) $(PROGRAM)
 	$(Q) rm -f cscope.*
 	$(Q) rm -f $(KVM_INCLUDE)/common-cmds.h
+	$(Q) rm -f KVMTOOLS-VERSION-FILE
 .PHONY: clean
 
 KVM_DEV	?= /dev/kvm
