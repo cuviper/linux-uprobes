@@ -17,6 +17,7 @@
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
 #include <asm/pgalloc.h>		/* pgd_*(), ...			*/
 #include <asm/kmemcheck.h>		/* kmemcheck_*(), ...		*/
+#include <asm/vsyscall.h>
 
 /*
  * Page fault error code bits:
@@ -719,6 +720,18 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 
 		if (is_errata100(regs, address))
 			return;
+
+#ifdef CONFIG_X86_64
+		/*
+		 * Instruction fetch faults in the vsyscall page might need
+		 * emulation.
+		 */
+		if (unlikely((error_code & PF_INSTR) &&
+			     ((address & ~0xfff) == VSYSCALL_START))) {
+			if (emulate_vsyscall(regs, address))
+				return;
+		}
+#endif
 
 		if (unlikely(show_unhandled_signals))
 			show_signal_msg(regs, error_code, address, tsk);
