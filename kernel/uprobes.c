@@ -703,8 +703,10 @@ static struct vma_info *__find_next_vma_info(struct list_head *head,
 	int existing_vma;
 
 	vma_prio_tree_foreach(vma, &iter, &mapping->i_mmap, pgoff, pgoff) {
-		if (!vma || !valid_vma(vma))
+		if (!vma)
 			return NULL;
+		if (!valid_vma(vma))
+			continue;
 
 		existing_vma = 0;
 		vaddr = vma->vm_start + offset;
