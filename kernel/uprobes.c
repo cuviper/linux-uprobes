@@ -1329,9 +1329,20 @@ bool uprobe_deny_signal(void)
 		spin_lock_irq(&tsk->sighand->siglock);
 		clear_tsk_thread_flag(tsk, TIF_SIGPENDING);
 		spin_unlock_irq(&tsk->sighand->siglock);
+
+		if (__fatal_signal_pending(tsk) || xol_was_trapped(tsk)) {
+			utask->state = UTASK_SSTEP_TRAPPED;
+			set_tsk_thread_flag(tsk, TIF_UPROBE);
+			set_tsk_thread_flag(tsk, TIF_NOTIFY_RESUME);
+		}
 	}
 
 	return true;
+}
+
+void __weak abort_xol(struct pt_regs *regs, struct uprobe_task *utask)
+{
+	set_instruction_pointer(regs, utask->vaddr);
 }
 
 /*
@@ -1386,6 +1397,8 @@ void uprobe_notify_resume(struct pt_regs *regs)
 		u = utask->active_uprobe;
 		if (utask->state == UTASK_SSTEP_ACK)
 			post_xol(u, regs);
+		else if (utask->state == UTASK_SSTEP_TRAPPED)
+			abort_xol(regs, utask);
 		else
 			WARN_ON_ONCE(1);
 
@@ -1409,9 +1422,8 @@ cleanup_ret:
 	if (u) {
 		put_uprobe(u);
 		set_instruction_pointer(regs, probept);
-	} else {
-		/*TODO Return SIGTRAP signal */
-	}
+	} else
+		send_sig(SIGTRAP, current, 0);
 }
 
 /*
